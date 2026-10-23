@@ -321,12 +321,40 @@ const ERRROWS = [["BAD_REQUEST","پارامتر نامعتبر","Invalid paramet
   ["INTERNAL_ERROR","خطای داخلی","Internal"]];
 
 /* --------------------------------- UI ----------------------------------- */
-function renderPage(lang, nonce) {
+function serverCard(t, base, lang) {
   const s = STR[lang] || STR.fa;
+  const dur = fmtDur(t.duration_ms, lang === "fa");
+  const sid = t.id.replace(/^sc_/, "");
+  const fa_d = n => String(n).replace(/[0-9]/g, d => "۰۱۲۳۴۵۶۷۸۹"[d]);
+  let b = `<div class="card"><div class="im" data-d="${t.id}">`;
+  if (t.cover) b += `<img loading="lazy" src="${base}/api/v1/cover?url=${encodeURIComponent(t.cover)}" alt="">`;
+  if (t.streamable) b += `<button class="pbtn" data-p="${t.id}" aria-label="${esc(s.prev)}">▶</button>`;
+  b += `</div><div class="b"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist)}</div><div class="badges">`;
+  if (dur) b += `<span class="badge">${dur}</span>`;
+  if (t.genre) b += `<span class="badge">${esc(t.genre)}</span>`;
+  if (t.plays) b += `<span class="badge">▶${lang === "fa" ? fa_d(t.plays) : t.plays}</span>`;
+  if (t.downloadable) b += `<span class="badge hot">${esc(s.dl)}</span>`;
+  b += `</div></div><div class="actions">`;
+  if (t.streamable) b += `<button class="btn mini ghost" data-p="${t.id}">${esc(s.prev)}</button>`;
+  b += `<button class="btn mini ghost" data-d="${t.id}">${esc(s.details)}</button>`;
+  if (t.streamable || t.downloadable) b += `<a class="btn mini" href="${base}/api/v1/download?id=${encodeURIComponent(sid)}">${esc(s.dl)}</a>`;
+  return b + `</div></div>`;
+}
+
+function renderPage(lang, nonce, opts = {}) {
+  const s = STR[lang] || STR.fa;
+  const { q = "", results = null, origin = "" } = opts;
   const errRows = ERRROWS.map(([c, fa, en]) =>
     `<tr><td><code>${c}</code></td><td>${esc(lang === "fa" ? fa : en)}</td></tr>`).join("");
-  const faq = s.faq.map(([q, a]) =>
-    `<details class="reveal"><summary>${esc(q)}</summary><p>${esc(a)}</p></details>`).join("");
+  const faq = s.faq.map(([q2, a]) =>
+    `<details class="reveal"><summary>${esc(q2)}</summary><p>${esc(a)}</p></details>`).join("");
+  // Server-rendered result list (works with JS disabled).
+  let resultsHtml = "";
+  if (results !== null) {
+    resultsHtml = results.length
+      ? `<div class="grid">${results.map(t => serverCard(t, origin, lang)).join("")}</div>`
+      : `<p style="text-align:center;color:var(--mut);padding:2rem">${esc(s.none)}</p>`;
+  }
   return `<!DOCTYPE html>
 <html lang="${s.lang}" dir="${s.dir}">
 <head>
@@ -462,13 +490,13 @@ html.js .reveal.in{opacity:1;transform:none}
   <div class="hero reveal">
     <h1><span class="grad">SoundCloud</span> ${esc(s.title.split("|")[0].trim() === "ساندکلاد" ? "" : "")}</h1>
     <p>${esc(s.tagline)}</p>
-    <form class="search" id="sform" action="/api/v1/search" method="get">
-      <input type="search" name="q" placeholder="${esc(s.ph)}" required autocomplete="off" id="q" dir="auto">
+    <form class="search" id="sform" action="/" method="get">
+      <input type="search" name="q" placeholder="${esc(s.ph)}" required autocomplete="off" id="q" dir="auto" value="${esc(q)}">
       <button class="btn" type="submit">${esc(s.btn)}</button>
     </form>
     <div class="chips" id="chips"></div>
   </div>
-  <div id="results" aria-live="polite"></div>
+  <div id="results" aria-live="polite">${resultsHtml}</div>
   <section id="how" class="reveal"><h2>${esc(s.howT)}</h2><p>${esc(s.howB)}</p></section>
   <section id="api" class="reveal"><h2>${esc(s.apiT)}</h2>
     <pre>GET /api/v1/search?q=QUERY&amp;page=1
@@ -487,6 +515,7 @@ GET /health  ·  GET /openapi.json</pre>
   <section id="terms" class="reveal"><h2>${esc(s.termsT)}</h2><p>${esc(s.termsB)}</p></section>
 </div>
 <footer>${esc(s.foot)} · <a href="https://t.me/AliMsvD" rel="noopener">t.me/AliMsvD</a></footer>
+<script type="application/json" id="seed" nonce="${nonce}">${JSON.stringify(results || []).replace(/</g, "\\u003c")}</script>
 <div class="modal" id="modal" role="dialog" aria-modal="true"><div class="box">
 <button class="x" id="mx" aria-label="${esc(s.close)}">✕</button>
 <div class="hd"><img id="mimg" alt=""><div class="ti"><h3 id="mtitle"></h3><div class="ar" id="martist"></div><div class="stat" id="mstat"></div><div class="badges" id="mbadges"></div></div></div>
@@ -499,6 +528,10 @@ net:${JSON.stringify(s.net)},prev:${JSON.stringify(s.prev)},dl:${JSON.stringify(
 details:${JSON.stringify(s.details)},desc:${JSON.stringify(s.desc)},opts:${JSON.stringify(s.opts)},
 plays:${JSON.stringify(s.plays)},likes:${JSON.stringify(s.likes)},recent:${JSON.stringify(s.recent)}};
 var DATA={};
+// Seed DATA with server-rendered results so modal works pre-search.
+try{var seed=JSON.parse(document.getElementById('seed').textContent||'[]');
+seed.forEach(function(t){t.sid=t.sid||t.id.replace(/^sc_/,'');t.duration=t.duration_ms?fmtms(t.duration_ms):'';DATA[t.id]=t});}catch(e){}
+function fmtms(ms){var s=Math.round(ms/1000),m=Math.floor(s/60),r=s%60;var o=m+':'+String(r).padStart(2,'0');return L==='fa'?o.replace(/[0-9]/g,function(d){return '۰۱۲۳۴۵۶۷۸۹'[d]}):o}
 function show(m){try{var d=document.getElementById('dbg');if(location.search.indexOf('debug=1')>-1){d.style.display='block';d.textContent+=m+'\n'}}catch(e){}}
 window.addEventListener('error',function(e){show('ERR: '+e.message+' @'+e.lineno)});
 try{var b=document.getElementById('burger'),n=document.getElementById('nav');
@@ -668,10 +701,20 @@ export default {
       /* ------------------------------ web page ---------------------------- */
       if ((path === "/" || path === "") && (request.method === "GET" || request.method === "HEAD")) {
         const acc = request.headers.get("Accept") || "";
-        if (/text\/html/.test(acc)) {
+        // Serve HTML unless the client explicitly prefers JSON (q-value aware).
+        const wantsJson = /application\/json/.test(acc) && !/text\/html/.test(acc);
+        if (!wantsJson) {
           const lang = url.searchParams.get("lang") === "en" ? "en" : "fa";
           const nonce = crypto.randomUUID().replace(/-/g, "");
-          const html = renderPage(lang, nonce);
+          // Server-render results when ?q= so it works fully without JS.
+          const q = (url.searchParams.get("q") || "").trim();
+          let serverResults = null;
+          if (q) {
+            try { await sc.init();
+              serverResults = await sc.searchMusic(normalizeQuery(q), { limit: 24 });
+            } catch { serverResults = []; }
+          }
+          const html = renderPage(lang, nonce, { q, results: serverResults, origin: url.origin });
           const h = new Headers();
           h.set("Content-Type", "text/html; charset=utf-8");
           h.set("Content-Security-Policy", csp(nonce));

@@ -37,8 +37,10 @@ test("no github link; rtl + telegram footer", async () => {
   assert.ok(html.includes('dir="rtl"'));
 });
 
-test("GET / */* returns JSON summary", async () => {
-  const r = await worker.fetch(req("/", { Accept: "*/*" }), env);
+test("GET / returns HTML by default; JSON only for explicit application/json", async () => {
+  let r = await worker.fetch(req("/", { Accept: "*/*" }), env);
+  assert.ok(r.headers.get("Content-Type").includes("text/html"), "*/* should get HTML");
+  r = await worker.fetch(req("/", { Accept: "application/json" }), env);
   assert.ok(r.headers.get("Content-Type").includes("application/json"));
   const j = await r.json();
   assert.ok(j.endpoints.includes("/api/v1/search"));
