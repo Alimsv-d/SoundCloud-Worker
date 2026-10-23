@@ -114,22 +114,47 @@ class SoundCloud {
     } catch { return false; }
   }
 
+  // Authed request with auto client_id refresh on 401/403 — keeps the service
+  // alive even when SoundCloud rotates the id. Retries a couple of times.
+  async _get(url, tries = 2) {
+    let last;
+    for (let i = 0; i <= tries; i++) {
+      const cid = await this.getClientId();
+      const sep = url.includes("?") ? "&" : "?";
+      const res = await fetch(`${url}${sep}client_id=${cid}`,
+        { headers: { "User-Agent": "Mozilla/5.0" } });
+      if (res.status === 401 || res.status === 403) {
+        // client_id rotated -> force rescrape and retry
+        this.clientId = null;
+        if (this.kv) try { await this.kv.delete("sc:cid"); } catch {}
+        last = res; continue;
+      }
+      if (!res.ok) { last = res; break; }
+      return res.json();
+    }
+    const e = new Error("SoundCloud request failed" + (last ? " (" + last.status + ")" : ""));
+    e.status = last ? last.status : 0;
+    throw e;
+  }
+
   _norm(m, detailed = false) {
     const art = (m.artwork_url || m.user?.avatar_url || "").replace("large", "t500x500");
     const t = {
-      id: "sc_" + m.id, source: "soundcloud", title: m.title,
+      id: "sc_" + m.id, sid: m.id, source: "soundcloud", title: m.title,
       artist: m.user?.username || null, duration_ms: m.duration || null,
       cover: art || null, page_url: m.permalink_url,
       genre: m.genre || null, license: m.license || null,
-      streamable: !!m.streamable, downloadable: !!m.downloadable,
+      streamable: !!m.streamable, downloadable: !!(m.downloadable && m.download_url) || !!m.streamable,
       plays: m.playback_count || null, likes: m.likes_count || null,
+      reposts: m.reposts_count || null, comments: m.comment_count || null,
       created_at: m.created_at || null,
     };
     if (detailed) {
       t.description = m.description || null;
       t.tag_list = m.tag_list || null;
       t.waveform_url = m.waveform_url || null;
-      t.download_url = m.downloadable && m.download_url ? true : null;
+      t.bpm = m.bpm || null;
+      t.label = m.label_name || null;
       t.transcodings = (m.media?.transcodings || []).map(x => ({
         protocol: x.format?.protocol, mime: x.format?.mime_type })).slice(0, 6);
     }
@@ -137,23 +162,20 @@ class SoundCloud {
   }
 
   async searchMusic(query, { limit = 24, offset = 0 } = {}) {
-    const p = new URLSearchParams({
-      q: query, client_id: await this.getClientId(), limit: String(limit),
+    const p = new URLSearchParams({ q: query, limit: String(limit),
       offset: String(offset), linked_partitioning: "1", app_locale: "en" });
-    const d = await (await fetch(`${SC_API}search/tracks?${p}`,
-      { headers: { "User-Agent": "Mozilla/5.0" } })).json();
+    const d = await this._get(`${SC_API}search/tracks?${p}`);
     return (d.collection || []).filter(m => m.kind === "track").map(m => this._norm(m));
   }
 
   async getMusic(id) {
-    const m = await (await fetch(`${SC_API}tracks/${id}?client_id=${await this.getClientId()}`,
-      { headers: { "User-Agent": "Mozilla/5.0" } })).json();
+    const m = await this._get(`${SC_API}tracks/${id}`);
     return m && m.id ? this._norm(m, true) : null;
   }
 
   // Resolve the best playable media URL (prefers progressive mp3).
   async streamUrl(id) {
-    const m = await (await fetch(`${SC_API}tracks/${id}?client_id=${await this.getClientId()}`)).json();
+    const m = await this._get(`${SC_API}tracks/${id}`);
     return this._resolveMedia(m);
   }
   async _resolveMedia(m) {
@@ -508,6 +530,11 @@ GET /health  ·  GET /openapi.json</pre>
     <pre># legacy (original) endpoints
 /search?q= · /music?id= · /download-url?id=
 /direct-download?id= · /music-by-url?url=</pre>
+    <pre>// reuse in your own code / bot
+import { SoundCloud } from "./worker.js";
+const sc = new SoundCloud(); await sc.init();
+const tracks = await sc.searchMusic("تتلو");
+const media  = await sc.streamUrl(tracks[0].sid);</pre>
     <h3>${esc(s.errT)}</h3>
     <table><thead><tr><th>${esc(s.code)}</th><th>${esc(s.mean)}</th></tr></thead><tbody>${errRows}</tbody></table>
   </section>
@@ -819,3 +846,10 @@ export default {
     }
   },
 };
+
+// Exported for reuse (e.g. inside a Telegram bot). Usage:
+//   import worker, { SoundCloud } from "./worker.js";
+//   const sc = new SoundCloud(); await sc.init();
+//   const tracks = await sc.searchMusic("امیر تتلو");
+//   const media = await sc.streamUrl(track.sid);   // { url, file, hls }
+export { SoundCloud };
