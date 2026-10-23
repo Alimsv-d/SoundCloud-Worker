@@ -229,31 +229,72 @@ function makeJamendo(cid) {
     async health(o) { if (!cid) return false; await fetchJson(`https://api.jamendo.com/v3.0/tracks/?client_id=${cid}&format=json&limit=1`, o.timeout); return true; } };
 }
 
-function makeSoundCloud(cid) {
+// SoundCloud: client_id from secret, or auto-scraped from the site (like the
+// original). Cached in KV (or module memory) for ~1h.
+let _scCid = null;
+async function scClientId(cfg, kv) {
+  if (cfg.soundcloudClientId) return cfg.soundcloudClientId;
+  if (kv) { try { const c = await kv.get("sc:cid"); if (c) return c; } catch {} }
+  if (_scCid) return _scCid;
+  const h = await (await fetch("https://soundcloud.com/", {
+    headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } })).text();
+  const assets = [...h.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^."]+\.js)"/g)];
+  if (!assets.length) throw new UpErr("no sc assets", 0, "net");
+  const ac = await (await fetch(assets[assets.length - 1][1])).text();
+  const ids = [...ac.matchAll(/[,{]client_id:"([^"]+)"/g)];
+  if (!ids.length) throw new UpErr("no sc cid", 0, "net");
+  _scCid = ids[ids.length - 1][1];
+  if (kv) try { await kv.put("sc:cid", _scCid, { expirationTtl: 3600 }); } catch {}
+  return _scCid;
+}
+// Resolve the playable progressive stream URL for a track.
+async function scStreamUrl(m, cid, timeout) {
+  const tr = (m.media?.transcodings || []).find(t => t.format?.protocol === "progressive")
+    || (m.media?.transcodings || [])[0];
+  if (!tr) return null;
+  try {
+    const p = new URLSearchParams({ client_id: cid, track_authorization: m.track_authorization || "" });
+    const d = await fetchJson(tr.url + "?" + p, timeout);
+    return d.url || null;
+  } catch { return null; }
+}
+
+function makeSoundCloud(cfg, kv) {
   const norm = m => track({ id: "sc_" + m.id, source: "soundcloud", title: m.title,
     artist: m.user?.username, duration_ms: m.duration,
     cover: (m.artwork_url || m.user?.avatar_url || "").replace("large", "t500x500") || null,
-    preview_url: m.stream_url ? `${m.stream_url}?client_id=${cid}` : null, page_url: m.permalink_url,
+    preview_url: m.streamable ? `scstream_${m.id}` : null,
+    page_url: m.permalink_url,
+    description: m.description || null,
+    genre: m.genre || null,
     downloadable: !!m.downloadable && !!m.download_url,
-    downloads: m.downloadable && m.download_url ? [{ label: "original", url: `${m.download_url}?client_id=${cid}` }] : [],
-    license: m.license || "all-rights-reserved" });
-  return { name: "soundcloud", configured: !!cid,
+    downloads: m.downloadable && m.download_url ? [{ label: "original", url: `scdl_${m.id}` }] : [],
+    license: m.license || "all-rights-reserved",
+    _sc: m });
+  return { name: "soundcloud", configured: true,
     async search(q, o) {
-      if (!cid) return [];
-      const p = new URLSearchParams({ q, client_id: cid, limit: String(o.limit), offset: "0", linked_partitioning: "1" });
+      const cid = await scClientId(cfg, kv);
+      const p = new URLSearchParams({ q, client_id: cid, limit: String(o.limit), offset: String((o.page - 1) * o.limit), linked_partitioning: "1" });
       const d = await fetchJson("https://api-v2.soundcloud.com/search/tracks?" + p, o.timeout);
       return (d.collection || []).filter(m => m.kind === "track").map(norm);
     },
     async get(id, o) {
-      if (!cid) return null;
+      const cid = await scClientId(cfg, kv);
       const m = await fetchJson(`https://api-v2.soundcloud.com/tracks/${id.replace(/^sc_/, "")}?client_id=${cid}`, o.timeout);
       return m && m.id ? norm(m) : null;
     },
-    async health(o) { if (!cid) return false; const r = await fetch(`https://api-v2.soundcloud.com/tracks?client_id=${cid}&limit=1`, { signal: AbortSignal.timeout(o.timeout) }); return r.ok; } };
+    // Resolve a playable URL for preview or download on demand.
+    async resolve(id, o) {
+      const cid = await scClientId(cfg, kv);
+      const m = await fetchJson(`https://api-v2.soundcloud.com/tracks/${id}?client_id=${cid}`, o.timeout);
+      if (!m || !m.id) return null;
+      return await scStreamUrl(m, cid, o.timeout);
+    },
+    async health(o) { try { return !!(await scClientId(cfg, kv)); } catch { return false; } } };
 }
 
-function buildProviders(cfg) {
-  const list = [deezer, itunes, openverse, iarchive, makeJamendo(cfg.jamendoClientId), makeSoundCloud(cfg.soundcloudClientId)];
+function buildProviders(cfg, kv) {
+  const list = [deezer, itunes, openverse, iarchive, makeJamendo(cfg.jamendoClientId), makeSoundCloud(cfg, kv)];
   const brk = {}; for (const p of list) brk[p.name] = new Circuit(p.name);
   return { list, brk };
 }
@@ -372,11 +413,12 @@ const STR = {
     howT: "چطور کار می‌کند؟",
     howB: "این سرویس در چند منبع قانونی (Deezer، iTunes، Openverse، Internet Archive و در صورت تنظیم Jamendo و SoundCloud) جستجو می‌کند و نتایج را ادغام و تکراری‌ها را حذف می‌کند. پیش‌نمایش برای همه فعال است؛ دانلود فقط جایی که منبع اجازه دهد.",
     iran: "توجه: کاتالوگ هنرمندان ایرانی در این منابع قانونی محدود است؛ ممکن است همهٔ آهنگ‌های ایرانی پیدا نشوند.",
-    prev: "پیش‌نمایش", dl: "دانلود", open: "باز کردن در منبع",
+    prev: "پیش‌نمایش", dl: "دانلود", open: "باز کردن در منبع", details: "جزئیات",
     loading: "در حال جستجو…", none: "چیزی پیدا نشد", net: "خطای شبکه؛ دوباره تلاش کنید",
     apiT: "مستندات API", faqT: "سؤالات متداول", termsT: "قوانین و حذف محتوا",
     termsB: "این سرویس فقط به منابع عمومی و قانونی متصل می‌شود و هیچ فایلی را میزبانی نمی‌کند. حق نشر هر اثر متعلق به صاحب آن است.",
     foot: "ساخته‌شده توسط علی موسوی (AliMsvD)", lang: "English", dur: "مدت", lic: "مجوز",
+    desc: "توضیحات", genre: "سبک", opts: "گزینه‌های دانلود", close: "بستن", artist: "هنرمند",
     errT: "کدهای خطا", code: "کد", mean: "معنی",
     faq: [["چرا بعضی آهنگ‌ها دانلود ندارند؟","چون منبع اجازهٔ دانلود نمی‌دهد."],
           ["آیا فایل‌ها نگه‌داری می‌شوند؟","خیر؛ همه از CDN منبع پخش می‌شوند."],
@@ -387,11 +429,12 @@ const STR = {
     howT: "How it works",
     howB: "Queries several legal sources (Deezer, iTunes, Openverse, Internet Archive, and if configured Jamendo & SoundCloud), merges and de-duplicates. Preview for all; download only where allowed.",
     iran: "Note: the catalog of Iranian artists in these legal sources is limited.",
-    prev: "Preview", dl: "Download", open: "Open at source",
+    prev: "Preview", dl: "Download", open: "Open at source", details: "Details",
     loading: "Searching…", none: "Nothing found", net: "Network error; retry",
     apiT: "API Docs", faqT: "FAQ", termsT: "Terms & Takedown",
     termsB: "Only connects to public, legal sources; hosts no files. Copyright belongs to owners.",
     foot: "Built by Ali Mousavi (AliMsvD)", lang: "فارسی", dur: "Duration", lic: "License",
+    desc: "Description", genre: "Genre", opts: "Download options", close: "Close", artist: "Artist",
     errT: "Error codes", code: "Code", mean: "Meaning",
     faq: [["Why no download on some?","The source doesn't allow it."],
           ["Are files stored?","No; all stream from source CDNs."],
@@ -420,47 +463,66 @@ try{if("IntersectionObserver"in window&&!matchMedia("(prefers-reduced-motion: re
 setTimeout(function(){document.querySelectorAll(".reveal").forEach(function(n){n.style.opacity=1;n.style.transform="none"})},1000);
 </script>
 <style nonce="${nonce}">
-:root{--bg:#f7f8fb;--fg:#131520;--card:#fff;--mut:#6b7280;--acc:#5b5bd6;--bd:#e5e7eb}
-@media(prefers-color-scheme:dark){:root{--bg:#0e0f14;--fg:#e8eaf0;--card:#171a22;--mut:#9aa3b2;--acc:#8b8bf0;--bd:#2a2f3a}}
+:root{--bg:#f4f6fb;--fg:#131520;--card:#fff;--mut:#6b7280;--acc:#5b5bd6;--acc2:#8b5cf6;--bd:#e5e7eb;--sh:0 4px 24px rgba(0,0,0,.06)}
+@media(prefers-color-scheme:dark){:root{--bg:#0b0d13;--fg:#e8eaf0;--card:#151823;--mut:#9aa3b2;--acc:#8b8bf0;--acc2:#a78bfa;--bd:#262c3a;--sh:0 4px 24px rgba(0,0,0,.4)}}
 *{box-sizing:border-box}html{scroll-behavior:smooth}
 body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif;line-height:1.7}
-.wrap{max-width:840px;margin:0 auto;padding:1rem}
+.wrap{max-width:920px;margin:0 auto;padding:1rem}
 header{display:flex;align-items:center;justify-content:space-between;padding:1rem}
-.brand{font-weight:700;font-size:1.1rem}
+.brand{font-weight:800;font-size:1.15rem;background:linear-gradient(90deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .burger{cursor:pointer;background:none;border:1px solid var(--bd);border-radius:.5rem;padding:.4rem .7rem;color:var(--fg);font-size:1.1rem}
 nav{display:none;gap:1rem;padding:0 1rem}nav.open{display:flex;flex-direction:column}
 nav a{color:var(--fg);text-decoration:none;padding:.3rem 0}
-.hero{text-align:center;padding:3rem 1rem 2rem}.hero h1{font-size:2rem;margin:0 0 .5rem}.hero p{color:var(--mut)}
-.search{display:flex;gap:.5rem;max-width:560px;margin:1rem auto}
-.search input{flex:1;padding:.8rem 1rem;border:1px solid var(--bd);border-radius:.75rem;background:var(--card);color:var(--fg);font-size:1rem}
-.search select{padding:.8rem;border:1px solid var(--bd);border-radius:.75rem;background:var(--card);color:var(--fg)}
-.btn{background:var(--acc);color:#fff;border:none;border-radius:.75rem;padding:.8rem 1.2rem;font-size:1rem;cursor:pointer}
-.btn.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
-.note{font-size:.85rem;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:.75rem;padding:.6rem 1rem;max-width:560px;margin:0 auto}
-.grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));margin-top:1.5rem}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:1rem;overflow:hidden;display:flex;flex-direction:column}
-.card img{width:100%;aspect-ratio:1;object-fit:cover;background:var(--bd)}
-.card .b{padding:.8rem;display:flex;flex-direction:column;gap:.4rem;flex:1}
-.card .t{font-weight:600}.card .a{color:var(--mut);font-size:.9rem}
+.hero{text-align:center;padding:3rem 1rem 2rem}.hero h1{font-size:2.1rem;margin:0 0 .5rem;font-weight:800}
+.hero p{color:var(--mut)}
+.search{display:flex;gap:.5rem;max-width:600px;margin:1rem auto}
+.search input{flex:1;padding:.85rem 1rem;border:1px solid var(--bd);border-radius:.9rem;background:var(--card);color:var(--fg);font-size:1rem;box-shadow:var(--sh)}
+.search select{padding:.85rem;border:1px solid var(--bd);border-radius:.9rem;background:var(--card);color:var(--fg)}
+.btn{background:linear-gradient(90deg,var(--acc),var(--acc2));color:#fff;border:none;border-radius:.9rem;padding:.85rem 1.3rem;font-size:1rem;cursor:pointer;font-weight:600}
+.btn.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc);font-weight:500}
+.btn.mini{padding:.4rem .8rem;font-size:.82rem;border-radius:.6rem}
+.note{font-size:.85rem;color:var(--mut);background:var(--card);border:1px solid var(--bd);border-radius:.9rem;padding:.6rem 1rem;max-width:600px;margin:0 auto}
+.grid{display:grid;gap:1.1rem;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));margin-top:1.5rem}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:1.1rem;overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--sh);transition:transform .25s,box-shadow .25s}
+.card:hover{transform:translateY(-4px)}
+.card img{width:100%;aspect-ratio:1;object-fit:cover;background:var(--bd);cursor:pointer}
+.card .b{padding:.9rem;display:flex;flex-direction:column;gap:.4rem;flex:1}
+.card .t{font-weight:700;font-size:.98rem}
+.card .a{color:var(--mut);font-size:.88rem}
 .badges{display:flex;gap:.4rem;flex-wrap:wrap}
-.badge{font-size:.7rem;background:var(--bg);border:1px solid var(--bd);border-radius:1rem;padding:.1rem .55rem;color:var(--mut)}
+.badge{font-size:.68rem;background:var(--bg);border:1px solid var(--bd);border-radius:1rem;padding:.15rem .6rem;color:var(--mut);text-transform:capitalize}
 .actions{margin-top:auto;display:flex;gap:.5rem;flex-wrap:wrap}
-.actions .btn,.actions a{font-size:.85rem;padding:.5rem .8rem;flex:1;text-align:center;text-decoration:none;border-radius:.6rem}
+.actions .btn,.actions a{font-size:.85rem;padding:.55rem .7rem;flex:1;text-align:center;text-decoration:none;border-radius:.7rem}
 .actions a{background:transparent;color:var(--acc);border:1px solid var(--acc)}
-section{padding:2rem 1rem}section h2{font-size:1.4rem;margin-bottom:.8rem}
-details{background:var(--card);border:1px solid var(--bd);border-radius:.75rem;padding:.8rem 1rem;margin-bottom:.6rem}
+section{padding:2rem 1rem}section h2{font-size:1.4rem;margin-bottom:.8rem;font-weight:800}
+details{background:var(--card);border:1px solid var(--bd);border-radius:.9rem;padding:.8rem 1rem;margin-bottom:.6rem}
 summary{cursor:pointer;font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 th,td{border:1px solid var(--bd);padding:.5rem .7rem;text-align:start}
-pre{overflow:auto;background:var(--card);border:1px solid var(--bd);border-radius:.75rem;padding:1rem;direction:ltr;text-align:left;font-size:.82rem}
+pre{overflow:auto;background:var(--card);border:1px solid var(--bd);border-radius:.9rem;padding:1rem;direction:ltr;text-align:left;font-size:.82rem}
 footer{border-top:1px solid var(--bd);text-align:center;padding:2rem 1rem;color:var(--mut);font-size:.85rem}
 footer a{color:var(--acc);text-decoration:none}
 audio{width:100%;margin-top:.4rem}
 [hidden]{display:none!important}
+/* Detail modal */
+.modal{position:fixed;inset:0;background:rgba(10,10,15,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:1rem;z-index:50;opacity:0;pointer-events:none;transition:opacity .25s}
+.modal.open{opacity:1;pointer-events:auto}
+.modal .box{background:var(--card);border:1px solid var(--bd);border-radius:1.2rem;max-width:640px;width:100%;max-height:88vh;overflow:auto;transform:translateY(14px);transition:transform .25s}
+.modal.open .box{transform:none}
+.modal .hd{display:flex;gap:1rem;padding:1.2rem}
+.modal .hd img{width:130px;height:130px;border-radius:1rem;object-fit:cover;flex-shrink:0}
+.modal .hd .ti{flex:1;min-width:0}
+.modal .hd h3{margin:.1rem 0 .3rem;font-size:1.15rem}
+.modal .hd .ar{color:var(--mut)}
+.modal .x{position:sticky;top:.6rem;float:inline-end;background:var(--bg);border:1px solid var(--bd);border-radius:.6rem;padding:.2rem .7rem;cursor:pointer;color:var(--fg);font-size:1.1rem}
+.modal .bd{padding:0 1.2rem 1.2rem}
+.modal .desc{font-size:.9rem;color:var(--mut);white-space:pre-wrap;max-height:160px;overflow:auto;background:var(--bg);border-radius:.8rem;padding:.8rem;margin:.8rem 0}
+.dlrow{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--bd);border-radius:.8rem;padding:.6rem .9rem;margin:.5rem 0}
+.dlrow .l{font-size:.85rem;font-weight:600}
 html.js .reveal{opacity:0;transform:translateY(14px);transition:opacity .6s ease,transform .6s ease}
 html.js .reveal.in{opacity:1;transform:none}
 #dbg{position:fixed;inset-inline:0;bottom:0;max-height:40vh;overflow:auto;background:#3a0d0d;color:#ffd9d9;font-size:.75rem;padding:.5rem;display:none;z-index:99;direction:ltr}
-@media(max-width:560px){.search{flex-direction:column}.hero h1{font-size:1.5rem}}
+@media(max-width:560px){.search{flex-direction:column}.hero h1{font-size:1.5rem}.modal .hd{flex-direction:column}.modal .hd img{width:100%;height:auto}}
 </style>
 </head>
 <body>
@@ -509,10 +571,17 @@ fetch('/api/v1/search?q=test').then(r=>r.json())</pre>
   <section id="terms" class="reveal"><h2>${esc(s.termsT)}</h2><p>${esc(s.termsB)}</p></section>
 </div>
 <footer>${esc(s.foot)} · <a href="https://t.me/AliMsvD" rel="noopener">t.me/AliMsvD</a></footer>
+<div class="modal" id="modal" role="dialog" aria-modal="true"><div class="box">
+<button class="x" id="mx">${esc(s.close)} ✕</button>
+<div class="hd"><img id="mimg" alt=""><div class="ti"><h3 id="mtitle"></h3><div class="ar" id="martist"></div><div class="badges" id="mbadges"></div></div></div>
+<div class="bd"><div id="mdesc"></div><div id="mplayer"></div><div id="mdl"></div><div id="mlink"></div></div>
+</div></div>
 <script nonce="${nonce}">
 (function(){"use strict";
 var L=${JSON.stringify(lang)},T={loading:${JSON.stringify(s.loading)},none:${JSON.stringify(s.none)},
-net:${JSON.stringify(s.net)},prev:${JSON.stringify(s.prev)},dl:${JSON.stringify(s.dl)},open:${JSON.stringify(s.open)}};
+net:${JSON.stringify(s.net)},prev:${JSON.stringify(s.prev)},dl:${JSON.stringify(s.dl)},open:${JSON.stringify(s.open)},
+details:${JSON.stringify(s.details)},desc:${JSON.stringify(s.desc)},opts:${JSON.stringify(s.opts)}};
+var DATA={};
 function show(m){try{var d=document.getElementById('dbg');if(location.search.indexOf('debug=1')>-1){d.style.display='block';d.textContent+=m+'\n'}}catch(e){}}
 window.addEventListener('error',function(e){show('ERR: '+e.message+' @'+e.lineno)});
 try{var b=document.getElementById('burger'),n=document.getElementById('nav');
@@ -520,14 +589,40 @@ if(b)b.addEventListener('click',function(){n.classList.toggle('open');b.setAttri
 try{if('IntersectionObserver' in window){var io=new IntersectionObserver(function(es){es.forEach(function(x){if(x.isIntersecting){x.target.classList.add('in');io.unobserve(x.target)}})},{threshold:.1});
 document.querySelectorAll('.reveal').forEach(function(n){io.observe(n)})}else{document.querySelectorAll('.reveal').forEach(function(n){n.classList.add('in')})}}catch(e){show(e.message)}
 function es(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
-function card(t){var b='';b+='<div class="card">'+(t.cover?'<img loading="lazy" src="/api/v1/cover?url='+encodeURIComponent(t.cover)+'" alt="">':'');
+var modal=document.getElementById('modal');
+document.getElementById('mx').addEventListener('click',function(){modal.classList.remove('open');var a=document.querySelector('#mplayer audio');if(a)a.pause()});
+modal.addEventListener('click',function(e){if(e.target===modal){modal.classList.remove('open');var a=document.querySelector('#mplayer audio');if(a)a.pause()}});
+function card(t){DATA[t.id]=t;
+var b='<div class="card">';
+if(t.cover)b+='<img loading="lazy" data-d="'+t.id+'" src="/api/v1/cover?url='+encodeURIComponent(t.cover)+'" alt="">';
 b+='<div class="b"><div class="t">'+es(t.title)+'</div><div class="a">'+es(t.artist)+'</div><div class="badges"><span class="badge">'+es(t.source)+'</span>';
 if(t.duration)b+='<span class="badge">'+t.duration+'</span>';if(t.license)b+='<span class="badge">'+es(t.license)+'</span>';
 b+='</div><div class="actions">';
-if(t.preview_url)b+='<button class="btn ghost" data-p="'+encodeURIComponent(t.preview_url)+'">'+T.prev+'</button>';
-if(t.downloadable&&t.download)b+='<a class="btn" href="'+t.download+'">'+T.dl+'</a>';
-else if(t.page_url)b+='<a href="'+t.page_url+'" target="_blank" rel="noopener">'+T.open+'</a>';
+if(t.preview_url)b+='<button class="btn ghost mini" data-p="'+t.id+'">'+T.prev+'</button>';
+b+='<button class="btn mini" data-d="'+t.id+'">'+T.details+'</button>';
 b+='</div></div></div>';return b}
+function openModal(id){var t=DATA[id];if(!t)return;
+document.getElementById('mtitle').textContent=t.title||'';
+document.getElementById('martist').textContent=t.artist||'';
+var img=document.getElementById('mimg');
+if(t.cover){img.src='/api/v1/cover?url='+encodeURIComponent(t.cover);img.style.display=''}else img.style.display='none';
+var bg='';if(t.source)bg+='<span class="badge">'+es(t.source)+'</span>';
+if(t.duration)bg+='<span class="badge">'+t.duration+'</span>';
+if(t.genre)bg+='<span class="badge">'+es(t.genre)+'</span>';
+if(t.license)bg+='<span class="badge">'+es(t.license)+'</span>';
+document.getElementById('mbadges').innerHTML=bg;
+var dd=document.getElementById('mdesc');
+dd.innerHTML=t.description?'<div class="desc">'+es(t.description)+'</div>':'';
+document.getElementById('mplayer').innerHTML=t.preview_url?'<audio controls preload="none" src="/api/v1/stream?url='+encodeURIComponent(t.preview_url)+'"></audio>':'';
+var dl=document.getElementById('mdl'),rows='';
+if(t.downloadable&&t.options&&t.options.length){
+ rows='<h4 style="margin:.6rem 0 .2rem">'+T.opts+'</h4>';
+ t.options.forEach(function(lb,i){rows+='<div class="dlrow"><span class="l">'+es(lb)+'</span><a class="btn mini" href="/api/v1/download?id='+encodeURIComponent(t.id)+'&index='+i+'">'+T.dl+'</a></div>'});
+}else if(t.page_url){
+ rows='<div class="dlrow"><span class="l">'+es(t.source)+'</span><a class="btn mini ghost" href="'+t.page_url+'" target="_blank" rel="noopener">'+T.open+'</a></div>';
+}
+dl.innerHTML=rows;
+modal.classList.add('open')}
 try{var form=document.getElementById('sform'),out=document.getElementById('results');
 form.addEventListener('submit',function(ev){ev.preventDefault();
 var q=document.getElementById('q').value.trim();if(!q)return;
@@ -536,11 +631,14 @@ fetch('/api/v1/search?q='+encodeURIComponent(q)+'&source='+document.getElementBy
 .then(function(r){return r.json()}).then(function(d){
 out.innerHTML=(d.results&&d.results.length)?'<div class="grid">'+d.results.map(card).join('')+'</div>':'<p>'+T.none+'</p>'})
 .catch(function(e){out.innerHTML='<p>'+T.net+'</p>';show(e.message)})});
-out.addEventListener('click',function(e){var b=e.target.closest('[data-p]');if(!b)return;
-var a=b.parentElement.querySelector('audio');
+out.addEventListener('click',function(e){
+var d=e.target.closest('[data-d]');if(d){openModal(d.getAttribute('data-d'));return}
+var b=e.target.closest('[data-p]');if(!b)return;
+var id=b.getAttribute('data-p'),t=DATA[id];if(!t||!t.preview_url)return;
+var a=b.parentElement.parentElement.querySelector('audio');
 if(a){a.paused?a.play():a.pause();return}
 a=document.createElement('audio');a.controls=true;a.preload='none';
-a.src='/api/v1/stream?url='+b.getAttribute('data-p');b.parentElement.appendChild(a);a.play()})}catch(e){show(e.message)}
+a.src='/api/v1/stream?url='+encodeURIComponent(t.preview_url);b.parentElement.appendChild(a);a.play()})}catch(e){show(e.message)}
 })();
 </script>
 </body>
@@ -567,9 +665,13 @@ const authed = (r, c) => !c.apiKeys || c.apiKeys.includes(
   r.headers.get("x-api-key") || (r.headers.get("Authorization") || "").replace(/^Bearer\s+/i, ""));
 
 function present(t, base) {
+  const prev = t.preview_url && t.preview_url.startsWith("scstream_")
+    ? `${base}/api/v1/stream?url=${encodeURIComponent(t.preview_url)}` : t.preview_url;
   return { id: t.id, source: t.source, title: t.title, artist: t.artist,
     duration: t.duration_ms ? Math.round(t.duration_ms / 1000) + "s" : null,
-    cover: t.cover, preview_url: t.preview_url, page_url: t.page_url,
+    duration_ms: t.duration_ms || null,
+    cover: t.cover, preview_url: prev, page_url: t.page_url,
+    description: t.description || null, genre: t.genre || null,
     downloadable: t.downloadable,
     download: t.downloadable && t.downloads.length ? `${base}/api/v1/download?id=${encodeURIComponent(t.id)}&index=0` : null,
     options: t.downloads.map(d => d.label), license: t.license };
@@ -578,7 +680,7 @@ function present(t, base) {
 export default {
   async fetch(request, env) {
     const reqId = rid(), url = new URL(request.url), path = url.pathname;
-    const cfg = getConfig(env), kv = env.CACHE_KV || null, prov = buildProviders(cfg);
+    const cfg = getConfig(env), kv = env.CACHE_KV || null, prov = buildProviders(cfg, kv);
     try {
       // Web page / JSON summary
       if ((path === "/" || path === "") && (request.method === "GET" || request.method === "HEAD")) {
@@ -655,9 +757,19 @@ export default {
           let t; try { t = await p.get(id, { timeout: cfg.upstreamTimeoutMs }); }
           catch { return err("UPSTREAM", {}, reqId); }
           if (!t) return err("NOT_FOUND", { id }, reqId);
-          if (!t.downloadable || !t.downloads.length) return err("NOT_DOWNLOADABLE", { id }, reqId);
+          let target;
           const dl = t.downloads[index] || t.downloads[0];
-          const res = await proxyMedia(dl.url, cfg, request, "audio");
+          if (dl && dl.url && dl.url.startsWith("scdl_")) {
+            // resolve progressive stream as the downloadable file
+            try { target = await p.resolve(dl.url.replace("scdl_", ""), { timeout: cfg.upstreamTimeoutMs }); }
+            catch { return err("UPSTREAM", {}, reqId); }
+            if (!target) return err("NOT_DOWNLOADABLE", { id }, reqId);
+          } else if (dl && dl.url) {
+            target = dl.url;
+          } else {
+            return err("NOT_DOWNLOADABLE", { id }, reqId);
+          }
+          const res = await proxyMedia(target, cfg, request, "audio");
           if (res instanceof Response && res.ok) res.headers.set("Content-Disposition",
             `attachment; filename*=UTF-8''${encodeURIComponent((t.title || "track").replace(/[^\w؀-ۿ -]/g, "_"))}`);
           return res;
@@ -666,6 +778,15 @@ export default {
         if (path === "/api/v1/stream") {
           const target = url.searchParams.get("url");
           if (!target) return err("BAD_REQUEST", { param: "url" }, reqId);
+          // SoundCloud lazy stream resolution
+          if (target.startsWith("scstream_")) {
+            const sid = target.replace("scstream_", "");
+            const sc = prov.list.find(p => p.name === "soundcloud");
+            let u; try { u = await sc.resolve(sid, { timeout: cfg.upstreamTimeoutMs }); }
+            catch { return err("UPSTREAM", {}, reqId); }
+            if (!u) return err("NOT_FOUND", {}, reqId);
+            return proxyMedia(u, cfg, request, "audio");
+          }
           if (!validateMediaUrl(target, cfg).ok) return err("BLOCKED_URL", {}, reqId);
           return proxyMedia(target, cfg, request, "audio");
         }
