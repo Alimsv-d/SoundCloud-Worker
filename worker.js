@@ -229,6 +229,124 @@ function makeJamendo(cid) {
     async health(o) { if (!cid) return false; await fetchJson(`https://api.jamendo.com/v3.0/tracks/?client_id=${cid}&format=json&limit=1`, o.timeout); return true; } };
 }
 
+/* ============================================================================
+ * SoundCloud — faithful port of the original class (same endpoints/logic).
+ * Scrapes client_id from the site; validates via oauth/session.
+ * ========================================================================== */
+const SOUNDCLOUD_URL = "https://soundcloud.com/";
+const SOUNDCLOUD_API_URL = "https://api-v2.soundcloud.com/";
+const SOUNDCLOUD_AUTH_URL = "https://api-auth.soundcloud.com/";
+
+class SoundCloud {
+  constructor() { this.clientId = null; }
+
+  async init() { if (!await this.checkClientId()) await this.setClientId(); }
+
+  async searchMusic(query) {
+    try {
+      const musics = [];
+      const params = new URLSearchParams({
+        'q': query, 'sc_a_id': '801c8a51-9227-40d9-9c11-ac16f6bca216',
+        'variant_ids': '', 'facet': 'genre', 'user_id': '367935-565481-285242-514567',
+        'client_id': await this.getClientId(), 'limit': '20', 'offset': '0',
+        'linked_partitioning': '1', 'app_version': '1667398191', 'app_locale': 'en'
+      });
+      const response = await fetch(`${SOUNDCLOUD_API_URL}search/tracks?${params}`);
+      const data = await response.json();
+      for (const music of (data.collection || [])) {
+        if (music.kind === 'track' && music.streamable) {
+          musics.push({
+            'id': music.id,
+            "picture": (music.artwork_url || music.user.avatar_url).replace("large", "original"),
+            "name": music.title, 'release': music.created_at, 'genre': music.genre,
+            'duration': music.duration, 'soundcloudurl': music.permalink_url
+          });
+        }
+      }
+      return musics;
+    } catch (e) { return this.internalError(); }
+  }
+
+  async getMusic(id, exportOriginal = false) {
+    try {
+      const params = new URLSearchParams({
+        'ids': id, 'client_id': await this.getClientId(), '%5Bobject%20Object%5D': '',
+        'app_version': '1667398191', 'app_locale': 'en'
+      });
+      const response = await fetch(`${SOUNDCLOUD_API_URL}tracks?${params}`);
+      const data = await response.json();
+      const musicData = data[0];
+      if (!musicData) return false;
+      if (exportOriginal) return musicData;
+      return { 'status': true, 'id': id,
+        'picture': (musicData.artwork_url || musicData.user.avatar_url).replace("large", "original"),
+        'title': musicData.title, 'release': musicData.created_at, 'genre': musicData.genre,
+        'duration': musicData.duration, 'soundcloudurl': musicData.permalink_url };
+    } catch (e) { return this.internalError(); }
+  }
+
+  async getDownloadUrl(id) {
+    try {
+      const dataMusic = await this.getMusic(id, true);
+      if (!dataMusic || !dataMusic.media || !dataMusic.media.transcodings) return this.internalError();
+      const trackAuthorization = dataMusic.track_authorization;
+      const transcoding = dataMusic.media.transcodings.find(t =>
+        t.format && t.format.protocol === 'progressive') || dataMusic.media.transcodings[0];
+      if (!transcoding) return this.internalError();
+      const params = new URLSearchParams({
+        'client_id': await this.getClientId(), 'track_authorization': trackAuthorization });
+      const response = await fetch(`${transcoding.url}?${params}`);
+      const data = await response.json();
+      return { status: true, download_url: data.url, title: dataMusic.title,
+        duration: dataMusic.duration,
+        artwork: (dataMusic.artwork_url || dataMusic.user.avatar_url).replace("large", "original") };
+    } catch (e) { return this.internalError(); }
+  }
+
+  async getMusicWithUrl(url) {
+    if (!this.isValidSoundCloudUrl(url)) return false;
+    const response = await fetch(url);
+    const webPageContent = await response.text();
+    const matches = [...webPageContent.matchAll(/soundcloud:\/\/sounds:(.*?)"/gm)];
+    return matches.length > 0 && matches[0][1] ? await this.getMusic(matches[0][1]) : false;
+  }
+
+  async setClientId() {
+    const response = await fetch(SOUNDCLOUD_URL);
+    const pageData = await response.text();
+    const assets = [...pageData.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^.]+\.js)"/g)];
+    const assetUrl = assets[assets.length - 1][1];
+    const assetContent = await (await fetch(assetUrl)).text();
+    const clientIds = [...assetContent.matchAll(/[,|{]client_id:"([^"]+)"/g)];
+    if (clientIds.length > 0) {
+      this.clientId = clientIds[Math.floor(Math.random() * clientIds.length)][1];
+      return this.clientId;
+    }
+    throw new Error("Could not find client ID");
+  }
+
+  async getClientId() {
+    if (!this.clientId) await this.setClientId();
+    return this.clientId;
+  }
+
+  async checkClientId() {
+    try {
+      const params = new URLSearchParams({ 'client_id': await this.getClientId() });
+      const response = await fetch(`${SOUNDCLOUD_AUTH_URL}oauth/session?${params}`);
+      const data = await response.json();
+      return !!data.session;
+    } catch (e) { return false; }
+  }
+
+  isValidSoundCloudUrl(url) {
+    try { new URL(url); } catch { return false; }
+    return /^https?:\/\/(?:www\.)?(?:m\.)?soundcloud\.com\/[a-zA-Z0-9-_]+\/[a-zA-Z0-9-_]+(?:\/)?/.test(url);
+  }
+
+  internalError() { return { 'status': false, 'status_det': "INTERNAL_ERROR" }; }
+}
+
 // SoundCloud: client_id from secret, or auto-scraped from the site (like the
 // original). Cached in KV (or module memory) for ~1h.
 let _scCid = null;
@@ -682,6 +800,55 @@ export default {
     const reqId = rid(), url = new URL(request.url), path = url.pathname;
     const cfg = getConfig(env), kv = env.CACHE_KV || null, prov = buildProviders(cfg, kv);
     try {
+      // ---------- Legacy SoundCloud endpoints (original API) ---------------
+      const cors = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      };
+      if (request.method === "OPTIONS") return new Response(null, { headers: cors });
+      const legacy = async (fn) => {
+        const sc = new SoundCloud(); await sc.init();
+        const out = await fn(sc);
+        return new Response(JSON.stringify(out),
+          { headers: { ...cors, 'Content-Type': 'application/json' } });
+      };
+      if (path === "/search" && request.method === "GET") {
+        const q = url.searchParams.get('q');
+        if (!q) return new Response(JSON.stringify({ error: 'Query parameter "q" is required' }),
+          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        return legacy(sc => sc.searchMusic(q));
+      }
+      if (path === "/music" && request.method === "GET") {
+        const id = url.searchParams.get('id');
+        if (!id) return new Response(JSON.stringify({ error: 'Parameter "id" is required' }),
+          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        return legacy(sc => sc.getMusic(id));
+      }
+      if (path === "/download-url" && request.method === "GET") {
+        const id = url.searchParams.get('id');
+        if (!id) return new Response(JSON.stringify({ error: 'Parameter "id" is required' }),
+          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        return legacy(sc => sc.getDownloadUrl(id));
+      }
+      if (path === "/music-by-url" && request.method === "GET") {
+        const u = url.searchParams.get('url');
+        if (!u) return new Response(JSON.stringify({ error: 'Parameter "url" is required' }),
+          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        return legacy(sc => sc.getMusicWithUrl(u));
+      }
+      if (path === "/direct-download" && request.method === "GET") {
+        const id = url.searchParams.get('id');
+        if (!id) return new Response(JSON.stringify({ error: 'Parameter "id" is required' }),
+          { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        const sc = new SoundCloud(); await sc.init();
+        const info = await sc.getDownloadUrl(id);
+        if (!info.status || !info.download_url)
+          return new Response(JSON.stringify(info),
+            { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
+        return Response.redirect(info.download_url, 302);
+      }
+
       // Web page / JSON summary
       if ((path === "/" || path === "") && (request.method === "GET" || request.method === "HEAD")) {
         const acc = request.headers.get("Accept") || "";
