@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import worker from "../worker.js";
 
-const env = { MAX_DOWNLOAD_MB: "50" };
+const env = { MAX_DOWNLOAD_MB: "100" };
 const req = (path, headers = {}, method = "GET") => new Request(`https://w.test${path}`, { headers, method });
 
 test("GET / text/html returns HTML with CSP nonce", async () => {
@@ -13,8 +13,7 @@ test("GET / text/html returns HTML with CSP nonce", async () => {
   assert.equal(r.headers.get("X-Frame-Options"), "DENY");
   const body = await r.text();
   assert.ok(body.includes("<html"));
-  // page sections present
-  for (const id of ["how", "api", "faq", "terms", "results", "burger", "nav"])
+  for (const id of ["how", "api", "faq", "terms", "results", "burger", "nav", "modal"])
     assert.ok(body.includes(`id="${id}"`), `missing ${id}`);
 });
 
@@ -22,17 +21,15 @@ test("no opacity:0 except under html.js reveal / .modal", async () => {
   const r = await worker.fetch(req("/", { Accept: "text/html" }), env);
   const html = await r.text();
   assert.ok(html.includes("html.js .reveal{opacity:0"));
-  // allowed opacity:0 occurrences: html.js .reveal rule and .modal rule
   const allowed = (html.match(/html\.js \.reveal\{opacity:0/g) || []).length +
                   (html.match(/\.modal\{[^}]*opacity:0/g) || []).length;
-  assert.equal(html.split("opacity:0").length - 1, allowed, "stray opacity:0 found");
+  assert.equal(html.split("opacity:0").length - 1, allowed, "stray opacity:0");
   assert.ok(html.includes("[hidden]{display:none!important}"));
-  assert.ok(!/on(click|error|load|submit)=/i.test(html), "inline handler found");
+  assert.ok(!/on(click|error|load|submit)=/i.test(html), "inline handler");
 });
 
-test("no github link in HTML; has telegram + footer", async () => {
-  const r = await worker.fetch(req("/", { Accept: "text/html" }), env);
-  const html = await r.text();
+test("no github link; rtl + telegram footer", async () => {
+  const html = await (await worker.fetch(req("/", { Accept: "text/html" }), env)).text();
   assert.ok(!/github\.com/i.test(html));
   assert.ok(/t\.me\/AliMsvD/.test(html));
   assert.ok(html.includes('dir="rtl"'));
@@ -46,31 +43,22 @@ test("GET / */* returns JSON summary", async () => {
   assert.ok(j.request_id);
 });
 
-test("HEAD / returns headers + empty body", async () => {
-  const r = await worker.fetch(req("/", { Accept: "text/html" }, "HEAD"), env);
-  assert.equal(await r.text(), "");
+test("HEAD / empty body", async () => {
+  assert.equal(await (await worker.fetch(req("/", { Accept: "text/html" }, "HEAD"), env)).text(), "");
 });
 
-test("search requires q", async () => {
-  const r = await worker.fetch(req("/api/v1/search"), env);
-  assert.equal(r.status, 400);
-  assert.equal((await r.json()).error.code, "BAD_REQUEST");
+test("search requires q (api + legacy)", async () => {
+  assert.equal((await worker.fetch(req("/api/v1/search"), env)).status, 400);
+  assert.equal((await worker.fetch(req("/search"), env)).status, 400);
 });
 
 test("unknown route 404", async () => {
   assert.equal((await worker.fetch(req("/nope"), env)).status, 404);
 });
 
-test("stream blocks disallowed host (SSRF)", async () => {
-  const r = await worker.fetch(req("/api/v1/stream?url=" + encodeURIComponent("https://evil.example.com/a.mp3")), env);
-  assert.equal(r.status, 403);
-  assert.equal((await r.json()).error.code, "BLOCKED_URL");
-});
-
-test("health lists providers", async () => {
-  const j = await (await worker.fetch(req("/health"), env)).json();
-  for (const p of ["deezer", "itunes", "openverse", "archive"]) assert.equal(j.providers[p].configured, true);
-  assert.equal(j.providers.jamendo.configured, false);
+test("cover blocks non-soundcloud host", async () => {
+  const r = await worker.fetch(req("/api/v1/cover?url=" + encodeURIComponent("https://evil.com/a.png")), env);
+  assert.equal(r.status, 400);
 });
 
 test("openapi has no github", async () => {

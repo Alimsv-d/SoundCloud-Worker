@@ -1,11 +1,11 @@
-name = "music-search-worker"
+name = "soundcloud-worker"
 main = "worker.js"
 compatibility_date = "2024-10-01"
 
-# NOTE: deploy works with ZERO required fields — the service runs fully on the
-# keyless sources (Deezer, iTunes, Openverse, Internet Archive).
+# SoundCloud-only music worker — deploy needs ZERO required fields.
+# client_id is auto-scraped; no secrets required.
 #
-# Optional KV (for rate-limiting + caching). To enable:
+# Optional KV (rate-limit + cache). To enable:
 #   npx wrangler kv:namespace create CACHE_KV
 # then uncomment below and paste the printed id.
 # [[kv_namespaces]]
@@ -13,13 +13,12 @@ compatibility_date = "2024-10-01"
 # id = "REPLACE_WITH_NAMESPACE_ID"
 
 [vars]
-MAX_DOWNLOAD_MB = "50"
-CACHE_TTL_SECONDS = "60"
-UPSTREAM_TIMEOUT_MS = "10000"
-RATE_LIMIT_SEARCH = "30"
-RATE_LIMIT_MEDIA = "60"
+MAX_DOWNLOAD_MB = "100"
+CACHE_TTL_SECONDS = "300"
+UPSTREAM_TIMEOUT_MS = "12000"
+RATE_LIMIT_SEARCH = "40"
+RATE_LIMIT_MEDIA = "90"
 RATE_LIMIT_WINDOW_SEC = "60"
-CDN_ALLOWLIST = "sndcdn.com,dzcdn.net,mzstatic.com,jamendo.com,jamendo.net,archive.org,us.archive.org,prod-images.openverse.org,api.openverse.org"
 
 # Optional secrets — set via `wrangler secret put` or Dashboard → Secrets:
-#   SOUNDCLOUD_CLIENT_ID, JAMENDO_CLIENT_ID, API_KEYS
+#   SOUNDCLOUD_CLIENT_ID (override auto-scrape), API_KEYS (gate /api/v1)
