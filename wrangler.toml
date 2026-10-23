@@ -1,0 +1,23 @@
+name = "music-search-worker"
+main = "src/index.js"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# KV namespace (auto-provisioned). Run `wrangler kv:namespace create CACHE_KV`
+# and paste the id, or use `wrangler deploy --kv CACHE_KV`.
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "00000000000000000000000000000000"   # replace after `wrangler kv:namespace create CACHE_KV`
+
+[vars]
+MAX_DOWNLOAD_MB = "50"
+CACHE_TTL_SECONDS = "60"
+UPSTREAM_TIMEOUT_MS = "10000"
+RATE_LIMIT_SEARCH = "30"
+RATE_LIMIT_MEDIA = "60"
+RATE_LIMIT_WINDOW_SEC = "60"
+UPSTREAM_ALLOWLIST = "api.deezer.com,itunes.apple.com,api.openverse.org,archive.org,api.jamendo.com,api-v2.soundcloud.com,soundcloud.com,a-v2.sndcdn.com"
+CDN_ALLOWLIST = "sndcdn.com,dzcdn.net,mzstatic.com,jamendo.com,jamendo.net,archive.org,us.archive.org,prod-images.openverse.org,api.openverse.org"
+
+# Optional secrets — set via `wrangler secret put` or Dashboard (never in this file):
+#   SOUNDCLOUD_CLIENT_ID, JAMENDO_CLIENT_ID, API_KEYS

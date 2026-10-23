@@ -1,0 +1,6 @@
+# Copy to .dev.vars for local dev (wrangler dev). All values are OPTIONAL.
+# Leave unset to run fully on keyless sources (Deezer, iTunes, Openverse, Internet Archive).
+
+# JAMENDO_CLIENT_ID=your_jamendo_client_id
+# SOUNDCLOUD_CLIENT_ID=your_soundcloud_client_id
+# API_KEYS=key1,key2        # if set, /api/v1 requires x-api-key or Bearer
