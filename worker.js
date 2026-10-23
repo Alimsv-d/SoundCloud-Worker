@@ -154,13 +154,37 @@ class SoundCloud {
   // Resolve the best playable media URL (prefers progressive mp3).
   async streamUrl(id) {
     const m = await (await fetch(`${SC_API}tracks/${id}?client_id=${await this.getClientId()}`)).json();
+    return this._resolveMedia(m);
+  }
+  async _resolveMedia(m) {
     if (!m || !m.media?.transcodings) return null;
-    const tr = m.media.transcodings.find(t => t.format?.protocol === "progressive")
-      || m.media.transcodings[0];
-    if (!tr) return null;
     const cid = await this.getClientId();
-    const d = await (await fetch(`${tr.url}?client_id=${cid}&track_authorization=${m.track_authorization || ""}`)).json();
-    return d.url || null;
+    // 1) true downloadable file
+    if (m.downloadable && m.download_url) {
+      try {
+        const d = await (await fetch(`${m.download_url}?client_id=${cid}`,
+          { headers: { "User-Agent": "Mozilla/5.0" } })).json();
+        if (d.url) return { url: d.url, file: true };
+        if (d.redirectUri) return { url: d.redirectUri, file: true };
+      } catch {}
+    }
+    // 2) progressive (real audio file) preferred over HLS
+    const tr = m.media.transcodings.find(t => t.format?.protocol === "progressive");
+    if (tr) {
+      try {
+        const d = await (await fetch(`${tr.url}?client_id=${cid}&track_authorization=${m.track_authorization || ""}`)).json();
+        if (d.url) return { url: d.url, file: true };
+      } catch {}
+    }
+    // 3) fallback: first transcoding (may be HLS playlist)
+    const any = m.media.transcodings[0];
+    if (any) {
+      try {
+        const d = await (await fetch(`${any.url}?client_id=${cid}&track_authorization=${m.track_authorization || ""}`)).json();
+        if (d.url) return { url: d.url, file: false, hls: true };
+      } catch {}
+    }
+    return null;
   }
 
   async musicByUrl(u) {
@@ -172,7 +196,7 @@ class SoundCloud {
 }
 
 /* ------------------------------ SSRF proxy ------------------------------ */
-const AUDIO = /^audio\//i, IMAGE = /^image\//i;
+const AUDIO = /^(audio\/|application\/(vnd\.apple\.mpegurl|x-mpegURL|mpegURL|octet-stream))/i, IMAGE = /^image\//i;
 class PErr extends Error { constructor(m, s) { super(m); this.status = s; } }
 const SC_HOSTS = ["sndcdn.com", "soundcloud.com", "media-streaming.soundcloud.cloud",
   "playback.media-streaming.soundcloud.cloud", "a-v2.sndcdn.com"];
@@ -339,22 +363,54 @@ nav a{color:var(--fg);text-decoration:none;padding:.35rem .7rem;border-radius:.6
 .btn.mini{padding:.45rem .85rem;font-size:.82rem;border-radius:.7rem}
 .chips{display:flex;gap:.5rem;justify-content:center;flex-wrap:wrap;margin-top:1rem}
 .chip{font-size:.8rem;background:var(--card);border:1px solid var(--bd);border-radius:2rem;padding:.3rem .9rem;cursor:pointer;color:var(--mut)}
-.grid{display:grid;gap:1.1rem;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));margin-top:1.6rem}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);overflow:hidden;display:flex;flex-direction:column;box-shadow:var(--sh);transition:transform .25s,box-shadow .25s}
-.card:hover{transform:translateY(-5px)}
-.card .im{position:relative;aspect-ratio:1;overflow:hidden;background:linear-gradient(135deg,var(--bd),var(--bg))}
-.card .im img{width:100%;height:100%;object-fit:cover;display:block;cursor:pointer;transition:transform .4s}
-.card:hover .im img{transform:scale(1.05)}
-.card .im .pbtn{position:absolute;inset-inline-end:.6rem;bottom:.6rem;width:44px;height:44px;border-radius:50%;background:var(--acc);border:none;color:#fff;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 14px rgba(255,85,0,.5)}
-.card .b{padding:.85rem;display:flex;flex-direction:column;gap:.35rem;flex:1}
-.card .t{font-weight:700;font-size:.95rem;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.card .a{color:var(--mut);font-size:.85rem}
-.badges{display:flex;gap:.35rem;flex-wrap:wrap}
-.badge{font-size:.66rem;background:var(--bg);border:1px solid var(--bd);border-radius:1rem;padding:.15rem .6rem;color:var(--mut);text-transform:capitalize}
+.grid{display:flex;flex-direction:column;gap:.7rem;margin-top:1.4rem}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);display:flex;align-items:center;gap:.9rem;padding:.6rem;box-shadow:var(--sh);transition:transform .2s,border-color .2s}
+.card:hover{transform:translateY(-2px);border-color:var(--acc)}
+.card .im{position:relative;width:74px;height:74px;border-radius:.8rem;overflow:hidden;background:linear-gradient(135deg,var(--bd),var(--bg));flex-shrink:0;cursor:pointer}
+.card .im img{width:100%;height:100%;object-fit:cover;display:block}
+.card .im .pbtn{position:absolute;inset:0;background:rgba(0,0,0,.35);border:none;color:#fff;font-size:1.2rem;cursor:pointer;opacity:0;transition:opacity .2s;display:flex;align-items:center;justify-content:center}
+.card .im:hover .pbtn{opacity:1}
+.card .b{flex:1;min-width:0;display:flex;flex-direction:column;gap:.2rem}
+.card .t{font-weight:700;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .a{color:var(--mut);font-size:.82rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.badges{display:flex;gap:.3rem;flex-wrap:wrap}
+.badge{font-size:.64rem;background:var(--bg);border:1px solid var(--bd);border-radius:1rem;padding:.1rem .55rem;color:var(--mut);text-transform:capitalize}
 .badge.hot{background:linear-gradient(90deg,var(--acc),var(--acc2));color:#fff;border:none}
-.actions{margin-top:auto;display:flex;gap:.45rem}
-.actions .btn,.actions a{flex:1;text-align:center;text-decoration:none}
+.actions{display:flex;gap:.4rem;flex-shrink:0}
+.actions .btn,.actions a{text-decoration:none;white-space:nowrap}
 section{padding:2.4rem 0}section h2{font-size:1.45rem;margin-bottom:.9rem;font-weight:900}
+details{background:var(--card);border:1px solid var(--bd);border-radius:.9rem;padding:.85rem 1rem;margin-bottom:.6rem}
+summary{cursor:pointer;font-weight:700}
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th,td{border:1px solid var(--bd);padding:.5rem .7rem;text-align:start}
+pre{overflow:auto;background:var(--card);border:1px solid var(--bd);border-radius:.9rem;padding:1rem;direction:ltr;text-align:left;font-size:.8rem}
+footer{border-top:1px solid var(--bd);text-align:center;padding:2rem 1rem;color:var(--mut);font-size:.85rem}
+footer a{color:var(--acc);text-decoration:none;font-weight:600}
+audio{width:100%}
+[hidden]{display:none!important}
+/* skeleton */
+.sk{background:var(--card);border-radius:var(--r);height:88px;border:1px solid var(--bd);animation:pl 1.2s infinite}
+@keyframes pl{50%{opacity:.5}}
+/* modal */
+.modal{position:fixed;inset:0;background:rgba(8,8,14,.62);backdrop-filter:blur(5px);display:flex;align-items:center;justify-content:center;padding:1rem;z-index:60;opacity:0;pointer-events:none;transition:opacity .25s}
+.modal.open{opacity:1;pointer-events:auto}
+.modal .box{background:var(--card);border:1px solid var(--bd);border-radius:1.3rem;max-width:680px;width:100%;max-height:90vh;overflow:auto;transform:translateY(16px) scale(.98);transition:transform .25s}
+.modal.open .box{transform:none}
+.modal .hd{display:flex;gap:1.1rem;padding:1.3rem;position:relative}
+.modal .hd img{width:150px;height:150px;border-radius:1.1rem;object-fit:cover;flex-shrink:0;box-shadow:var(--sh)}
+.modal .hd .ti{flex:1;min-width:0}
+.modal .hd h3{margin:.1rem 0 .35rem;font-size:1.2rem;line-height:1.3}
+.modal .hd .ar{color:var(--mut);font-size:.95rem}
+.x{position:absolute;top:.9rem;inset-inline-end:.9rem;width:34px;height:34px;border-radius:50%;background:var(--bg);border:1px solid var(--bd);cursor:pointer;color:var(--fg);font-size:1rem;line-height:1}
+.modal .bd{padding:0 1.3rem 1.3rem}
+.modal .desc{font-size:.88rem;color:var(--mut);white-space:pre-wrap;max-height:200px;overflow:auto;background:var(--bg);border-radius:.8rem;padding:.9rem;margin:.9rem 0}
+.dlrow{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--bd);border-radius:.8rem;padding:.6rem .9rem;margin:.5rem 0}
+.dlrow .l{font-size:.85rem;font-weight:600}
+.stat{display:flex;gap:1.2rem;flex-wrap:wrap;margin:.5rem 0;color:var(--mut);font-size:.85rem}
+html.js .reveal{opacity:0;transform:translateY(16px);transition:opacity .55s ease,transform .55s ease}
+html.js .reveal.in{opacity:1;transform:none}
+#dbg{position:fixed;inset-inline:0;bottom:0;max-height:40vh;overflow:auto;background:#3a0d0d;color:#ffd9d9;font-size:.75rem;padding:.5rem;display:none;z-index:99;direction:ltr}
+@media(max-width:600px){.search{flex-direction:column}.hero h1{font-size:1.6rem}.modal .hd{flex-direction:column;align-items:center;text-align:center}.modal .hd img{width:200px;height:200px}.card .im{width:60px;height:60px}.actions{flex-direction:column}}
 details{background:var(--card);border:1px solid var(--bd);border-radius:.9rem;padding:.85rem 1rem;margin-bottom:.6rem}
 summary{cursor:pointer;font-weight:700}
 table{width:100%;border-collapse:collapse;font-size:.88rem}
@@ -464,16 +520,20 @@ function closeM(){modal.classList.remove('open');var a=document.querySelector('#
 document.getElementById('mx').addEventListener('click',closeM);
 modal.addEventListener('click',function(e){if(e.target===modal)closeM()});
 function card(t){DATA[t.id]=t;
-var b='<div class="card"><div class="im">';
-if(t.cover)b+='<img loading="lazy" data-d="'+t.id+'" src="/api/v1/cover?url='+encodeURIComponent(t.cover)+'" alt="">';
+var b='<div class="card">';
+b+='<div class="im" data-d="'+t.id+'">';
+if(t.cover)b+='<img loading="lazy" src="/api/v1/cover?url='+encodeURIComponent(t.cover)+'" alt="">';
 if(t.streamable)b+='<button class="pbtn" data-p="'+t.id+'" aria-label="'+T.prev+'">▶</button>';
 b+='</div><div class="b"><div class="t">'+es(t.title)+'</div><div class="a">'+es(t.artist)+'</div><div class="badges">';
 if(t.duration)b+='<span class="badge">'+t.duration+'</span>';
 if(t.genre)b+='<span class="badge">'+es(t.genre)+'</span>';
+if(t.plays)b+='<span class="badge">▶'+fd(t.plays)+'</span>';
 if(t.downloadable)b+='<span class="badge hot">'+T.dl+'</span>';
-b+='</div><div class="actions"><button class="btn mini ghost" data-d="'+t.id+'">'+T.details+'</button>';
+b+='</div></div><div class="actions">';
+if(t.streamable)b+='<button class="btn mini ghost" data-p="'+t.id+'">'+T.prev+'</button>';
+b+='<button class="btn mini ghost" data-d="'+t.id+'">'+T.details+'</button>';
 if(t.downloadable)b+='<a class="btn mini" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a>';
-b+='</div></div></div>';return b}
+b+='</div></div>';return b}
 function openModal(id){var t=DATA[id];if(!t)return;
 document.getElementById('mtitle').textContent=t.title||'';
 document.getElementById('martist').textContent=(t.artist||'');
@@ -490,8 +550,13 @@ if(t.downloadable)rows+='<div class="dlrow"><span class="l">'+T.dl+'</span><a cl
 if(t.page_url)rows+='<div class="dlrow"><span class="l">SoundCloud</span><a class="btn mini ghost" href="'+t.page_url+'" target="_blank" rel="noopener">'+T.open+'</a></div>';
 document.getElementById('mdl').innerHTML=rows;
 modal.classList.add('open');
-// fetch full details (description) lazily
-if(t.streamable||!t.description){fetch('/api/v1/track?id='+encodeURIComponent(t.sid)).then(function(r){return r.json()}).then(function(d){if(d.track&&d.track.description){document.getElementById('mdesc').innerHTML='<div class="desc">'+es(d.track.description)+'</div>'}}).catch(function(){})}}
+// lazily fetch full details (description/tags/waveform)
+fetch('/api/v1/track?id='+encodeURIComponent(t.sid)).then(function(r){return r.json()}).then(function(d){
+var k=d.track;if(!k)return;
+if(k.description)document.getElementById('mdesc').innerHTML='<div class="desc">'+es(k.description)+'</div>';
+var b2='';if(k.genre)b2+='<span class="badge">'+es(k.genre)+'</span>';if(k.license)b2+='<span class="badge">'+es(k.license)+'</span>';if(k.tag_list)b2+='<span class="badge">'+es(k.tag_list)+'</span>';
+if(b2)document.getElementById('mbadges').innerHTML=b2;
+}).catch(function(){})}}
 try{var form=document.getElementById('sform'),out=document.getElementById('results');
 form.addEventListener('submit',function(ev){ev.preventDefault();
 var q=document.getElementById('q').value.trim();if(!q)return;addRecent(q);
@@ -534,7 +599,7 @@ function present(t, base, lang) {
     duration: fmtDur(t.duration_ms, lang === "fa"), duration_ms: t.duration_ms,
     cover: t.cover, page_url: t.page_url, genre: t.genre, license: t.license,
     plays: t.plays, likes: t.likes, created_at: t.created_at,
-    streamable: t.streamable, downloadable: t.downloadable };
+    streamable: t.streamable, downloadable: t.streamable || t.downloadable };
 }
 
 export default {
@@ -576,9 +641,9 @@ export default {
       if (path === "/download-url" && request.method === "GET") {
         const id = need("id"); if (id instanceof Response) return id;
         return legacy(async () => {
-          const u = await sc.streamUrl(id);
+          const r = await sc.streamUrl(id);
           const m = await sc.getMusic(id);
-          return u ? { status: true, download_url: u, title: m && m.title,
+          return r ? { status: true, download_url: r.url, title: m && m.title,
             duration: m && m.duration_ms, artwork: m && m.cover }
             : { status: false, status_det: "INTERNAL_ERROR" };
         });
@@ -586,10 +651,10 @@ export default {
       if (path === "/direct-download" && request.method === "GET") {
         const id = need("id"); if (id instanceof Response) return id;
         await sc.init();
-        const u = await sc.streamUrl(id);
-        if (!u) return new Response(JSON.stringify({ status: false, status_det: "INTERNAL_ERROR" }),
+        const r = await sc.streamUrl(id);
+        if (!r || !r.url) return new Response(JSON.stringify({ status: false, status_det: "INTERNAL_ERROR" }),
           { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
-        return Response.redirect(u, 302);
+        return Response.redirect(r.url, 302);
       }
       if (path === "/music-by-url" && request.method === "GET") {
         const u = need("url"); if (u instanceof Response) return u;
@@ -669,9 +734,9 @@ export default {
         if (path === "/api/v1/stream") {
           const id = url.searchParams.get("id"); if (!id) return err("BAD_REQUEST", { param: "id" }, reqId);
           try { await sc.init(); } catch { return err("UPSTREAM", {}, reqId); }
-          let u; try { u = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
-          if (!u) return err("NOT_FOUND", { id }, reqId);
-          return proxyMedia(u, request, cfg, "audio");
+          let r; try { r = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
+          if (!r || !r.url) return err("NOT_FOUND", { id }, reqId);
+          return proxyMedia(r.url, request, cfg, "audio");
         }
 
         if (path === "/api/v1/download") {
@@ -679,10 +744,10 @@ export default {
           try { await sc.init(); } catch { return err("UPSTREAM", {}, reqId); }
           const m = await sc.getMusic(id);
           if (!m) return err("NOT_FOUND", { id }, reqId);
-          if (!m.downloadable) return err("NOT_DOWNLOADABLE", { id }, reqId);
-          let u; try { u = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
-          if (!u) return err("NOT_DOWNLOADABLE", { id }, reqId);
-          const res = await proxyMedia(u, request, cfg, "audio");
+          // Resolve the real file: prefer true download_url, else progressive, else HLS.
+          let r; try { r = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
+          if (!r || !r.url) return err("NOT_DOWNLOADABLE", { id }, reqId);
+          const res = await proxyMedia(r.url, request, cfg, "audio");
           if (res instanceof Response && res.ok) res.headers.set("Content-Disposition",
             `attachment; filename*=UTF-8''${encodeURIComponent((m.title || "track").replace(/[^\w؀-ۿ -]/g, "_"))}`);
           return res;

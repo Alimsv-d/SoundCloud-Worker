@@ -17,12 +17,14 @@ test("GET / text/html returns HTML with CSP nonce", async () => {
     assert.ok(body.includes(`id="${id}"`), `missing ${id}`);
 });
 
-test("no opacity:0 except under html.js reveal / .modal", async () => {
+test("no stray opacity:0 (only reveal/modal/pbtn)", async () => {
   const r = await worker.fetch(req("/", { Accept: "text/html" }), env);
   const html = await r.text();
   assert.ok(html.includes("html.js .reveal{opacity:0"));
+  // content must be visible by default: .reveal only hidden under html.js
   const allowed = (html.match(/html\.js \.reveal\{opacity:0/g) || []).length +
-                  (html.match(/\.modal\{[^}]*opacity:0/g) || []).length;
+                  (html.match(/\.modal\{[^}]*opacity:0/g) || []).length +
+                  (html.match(/\.pbtn\{[^}]*opacity:0/g) || []).length;
   assert.equal(html.split("opacity:0").length - 1, allowed, "stray opacity:0");
   assert.ok(html.includes("[hidden]{display:none!important}"));
   assert.ok(!/on(click|error|load|submit)=/i.test(html), "inline handler");
