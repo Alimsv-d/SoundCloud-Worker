@@ -3,16 +3,14 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Music search & download web service on Cloudflare Workers (Deezer, iTunes, Openverse, Internet Archive, Jamendo, SoundCloud)",
+  "description": "Music search & download on Cloudflare Workers — single-file worker.js (Deezer, iTunes, Openverse, Internet Archive, Jamendo, SoundCloud)",
   "scripts": {
-    "bundle": "node scripts/bundle.mjs",
-    "check": "node --check src/index.js && node scripts/bundle.mjs --check-only",
+    "check": "node --check worker.js",
     "test": "node --test 'test/*.test.js'",
     "secret-scan": "node scripts/secret-scan.mjs",
     "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.24.0",
     "parse5": "^7.2.1"
   }
 }

@@ -13,22 +13,14 @@ const PATTERNS = [
 ];
 
 let files;
-try {
-  files = execSync("git ls-files", { encoding: "utf8" }).split("\n").filter(Boolean);
-} catch {
-  files = [];
-}
+try { files = execSync("git ls-files", { encoding: "utf8" }).split("\n").filter(Boolean); }
+catch { files = []; }
 let bad = 0;
 for (const f of files) {
   if (/(\.example$|secret-scan|README|SETUP)/.test(f)) continue;
-  let content;
-  try { content = readFileSync(f, "utf8"); } catch { continue; }
-  for (const { name, re } of PATTERNS) {
-    if (re.test(content)) {
-      console.error(`✗ possible ${name} in ${f}`);
-      bad++;
-    }
-  }
+  let c; try { c = readFileSync(f, "utf8"); } catch { continue; }
+  for (const { name, re } of PATTERNS)
+    if (re.test(c)) { console.error(`✗ possible ${name} in ${f}`); bad++; }
 }
 if (bad) { console.error(`\n${bad} potential secret(s) found.`); process.exit(1); }
 console.log("secret-scan: clean");

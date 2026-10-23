@@ -1,20 +1,26 @@
 # Music Search & Download — Cloudflare Worker
 
-سرویس وب کامل برای **جستجو، پیش‌نمایش و دانلود موسیقی** از منابع قانونی روی Cloudflare Workers.
+سرویس وب تک‌فایلی برای **جستجو، پیش‌نمایش و دانلود موسیقی** از منابع قانونی روی Cloudflare Workers — همه‌چیز در یک فایل `worker.js`.
 
-A complete web service for **searching, previewing and downloading music** from legal sources on Cloudflare Workers.
+A single-file web service for **searching, previewing and downloading music** from legal sources on Cloudflare Workers — everything lives in `worker.js`.
 
 ## English
 
-Aggregates **Deezer, iTunes, Openverse, Internet Archive** (keyless, always on) plus optional **Jamendo** and **SoundCloud** (API key). Results are merged & de-duplicated. Downloads are proxied through an SSRF-hardened media proxy and are only offered where the source allows.
+Aggregates **Deezer, iTunes, Openverse, Internet Archive** (keyless, always on) plus optional **Jamendo** and **SoundCloud** (API key). Results are merged & de-duplicated. Downloads go through an SSRF-hardened media proxy and are only offered where the source allows.
 
-### Features
-- Combined multi-source search with pagination & source filter
-- Full Persian (RTL) UI default, English via `?lang=en`; Persian text normalization
-- SSRF-safe audio/image proxy (allowlist, https:443 only, manual redirects, IP blocklist, size cap, Range)
-- Rate limiting & short-lived caching via KV; ETag; request_id on every response
-- Works fully keyless; optional keys only enhance coverage
-- No D1, no admin panel
+The **entire service is one file: `worker.js`** — no build step, no modules, no dependencies. Deploy it directly.
+
+### Deploy (one click)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Alimsv-d/SoundCloud-Worker)
+
+The button deploys `worker.js` with **no required fields** — runs fully on keyless sources.
+
+### Deploy manually (paste)
+1. Cloudflare Dashboard → **Workers & Pages → Create Worker** → **paste `worker.js`** → Deploy.
+2. (Optional) Create a KV namespace `CACHE_KV` and bind it as `CACHE_KV` for rate-limit/caching.
+3. (Optional) Add Secrets: `SOUNDCLOUD_CLIENT_ID`, `JAMENDO_CLIENT_ID`, `API_KEYS`.
+
+Or via wrangler: `npx wrangler kv:namespace create CACHE_KV` (paste id into `wrangler.toml`), then `npx wrangler deploy`.
 
 ### Endpoints
 | Method | Path | Description |
@@ -28,62 +34,34 @@ Aggregates **Deezer, iTunes, Openverse, Internet Archive** (keyless, always on) 
 | GET | `/health?deep=1` | Health + per-provider status |
 | GET | `/openapi.json` | OpenAPI spec |
 
-### Deploy (one click)
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Alimsv-d/SoundCloud-Worker)
-
-The button deploys with **no required fields** — the service runs fully on keyless sources.
-
-### Optional secrets (Dashboard → Workers → Settings → Variables → Secrets)
+### Optional secrets (Dashboard → Settings → Variables → Secrets)
 | Secret | Effect |
 |--------|--------|
 | `SOUNDCLOUD_CLIENT_ID` | Enable SoundCloud source |
 | `JAMENDO_CLIENT_ID` | Enable Jamendo source |
-| `API_KEYS` | Comma-separated keys; if set, `/api/v1` requires `x-api-key` or `Bearer` |
+| `API_KEYS` | Comma-separated keys; if set, `/api/v1` requires `x-api-key`/`Bearer` |
 
-### Manual deploy
-```bash
-npm install
-npm run bundle          # builds dist/worker.js (upload this in the Dashboard editor)
-# or: npx wrangler deploy  (needs API token + account id)
-# create KV: npx wrangler kv:namespace create CACHE_KV  → paste id in wrangler.toml
-```
-
-### API Token permissions
-- **Workers Scripts** (Edit)
-- **KV Storage** (Edit)
-
-### GitHub-connected deploy on mobile
-If you connected Git in the dashboard, note the mobile web editor may not show the Git-connected repo — deploy via the **Deploy button**, **GitHub Action** (workflow_dispatch, needs the two secrets), or **wrangler CLI**.
+### API Token permissions (for wrangler/Action deploy)
+- **Workers Scripts** (Edit) · **KV Storage** (Edit)
 
 ### Legal
-This service only proxies public, legal sources and hosts no files. Copyright belongs to the owners; takedown on request. The catalog of Iranian artists in these legal sources is limited.
+Only proxies public, legal sources; hosts no files. Copyright belongs to owners; takedown on request. The Iranian-artist catalog in these legal sources is limited.
 
 ---
 
 ## فارسی
 
-این سرویس جستجو را در چند منبع قانونی موسیقی (Deezer، iTunes، Openverse، Internet Archive و در صورت تنظیم کلید، Jamendo و SoundCloud) انجام می‌دهد، نتایج را ادغام و تکراری‌ها را حذف می‌کند. دانلود فقط برای ترک‌هایی فعال است که منبع اجازه داده باشد و از طریق یک پروکسی امن (ضد SSRF) انجام می‌شود.
+این سرویس تک‌فایلی جستجو را در چند منبع قانونی (Deezer، iTunes، Openverse، Internet Archive و در صورت تنظیم کلید، Jamendo و SoundCloud) انجام می‌دهد و نتایج را ادغام و تکراری‌ها را حذف می‌کند. دانلود فقط جایی فعال است که منبع اجازه دهد و از پروکسی امن ضد SSRF عبور می‌کند.
 
-- رابط کاربری فارسی راست‌چین پیش‌فرض؛ انگلیسی با `?lang=en`
-- بدون نیاز به کلید کار می‌کند؛ کلیدها فقط پوشش را بیشتر می‌کنند
-- بدون D1 و بدون پنل ادمین؛ فقط KV
+**کل سرویس یک فایل است: `worker.js`** — بدون build، بدون وابستگی.
 
 ### دیپلوی یک‌کلیکی
-دکمهٔ «Deploy to Cloudflare» بالا را بزنید — بدون هیچ فیلد اجباری سرویس بالا می‌آید.
+دکمهٔ «Deploy to Cloudflare» بالا را بزنید — بدون هیچ فیلد اجباری `worker.js` بالا می‌آید.
 
-### کلیدهای اختیاری
-`SOUNDCLOUD_CLIENT_ID`، `JAMENDO_CLIENT_ID` و `API_KEYS` را از مسیر Dashboard → Workers → Settings → Variables → Secrets تنظیم کنید.
-
-### دیپلوی دستی
-```bash
-npm install
-npm run bundle          # dist/worker.js را در ویرایشگر داشبورد آپلود کنید
-# یا: npx wrangler deploy
-```
-
-### مجوزهای API Token
-- Workers Scripts (Edit)
-- KV Storage (Edit)
+### دیپلوی دستی (کپی)
+1. داشبورد کلادفلر → Workers & Pages → Create Worker → محتوای `worker.js` را بچسبانید → Deploy.
+2. (اختیاری) KV با نام `CACHE_KV` بسازید و bind کنید.
+3. (اختیاری) Secretها را اضافه کنید.
 
 ### ملاحظات حقوقی
 هیچ فایلی میزبانی نمی‌شود؛ همهٔ رسانه‌ها از CDN منبع پخش می‌شوند. کاتالوگ هنرمندان ایرانی در این منابع محدود است.
