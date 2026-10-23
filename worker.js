@@ -599,8 +599,17 @@ fetch('/api/v1/search?q='+encodeURIComponent(q)+'&lang='+L)
 out.innerHTML=(d.results&&d.results.length)?'<div class="grid">'+d.results.map(card).join('')+'</div>':'<p style="text-align:center;color:var(--mut);padding:2rem">'+T.none+'</p>'})
 .catch(function(e){out.innerHTML='<p style="text-align:center;color:var(--mut);padding:2rem">'+T.net+'</p>';show(e.message)})});
 out.addEventListener('click',function(e){
+// Handle preview first: its button sits inside the row's data-d container.
+var b=e.target.closest('[data-p]');
+if(b){
+  var pid=b.getAttribute('data-p'),pt=DATA[pid];
+  if(!pt)return;
+  openModal(pid);
+  setTimeout(function(){var a=document.querySelector('#mplayer audio');if(a){a.play().catch(function(){})}},80);
+  return;
+}
 var d=e.target.closest('[data-d]');if(d){openModal(d.getAttribute('data-d'));return}
-var b=e.target.closest('[data-p]');if(b){openModal(b.getAttribute('data-p'));var a=document.querySelector('#mplayer audio');if(a)a.play();return}})}catch(e){show(e.message)}
+})}catch(e){show(e.message)}
 })();
 </script>
 </body>
