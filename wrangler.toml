@@ -1,14 +1,16 @@
 name = "music-search-worker"
 main = "worker.js"
 compatibility_date = "2024-10-01"
-compatibility_flags = ["nodejs_compat"]
 
-# KV for rate-limit + cache. Deploy button auto-provisions a namespace when
-# bound via Dashboard; or run `npx wrangler kv:namespace create CACHE_KV`
-# and paste the printed id below.
-[[kv_namespaces]]
-binding = "CACHE_KV"
-id = "00000000000000000000000000000000"   # replace after `wrangler kv:namespace create CACHE_KV`
+# NOTE: deploy works with ZERO required fields — the service runs fully on the
+# keyless sources (Deezer, iTunes, Openverse, Internet Archive).
+#
+# Optional KV (for rate-limiting + caching). To enable:
+#   npx wrangler kv:namespace create CACHE_KV
+# then uncomment below and paste the printed id.
+# [[kv_namespaces]]
+# binding = "CACHE_KV"
+# id = "REPLACE_WITH_NAMESPACE_ID"
 
 [vars]
 MAX_DOWNLOAD_MB = "50"

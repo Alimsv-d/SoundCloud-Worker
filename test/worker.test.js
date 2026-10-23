@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parse } from "parse5";
 import worker from "../worker.js";
 
 const env = { MAX_DOWNLOAD_MB: "50" };

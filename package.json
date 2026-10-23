@@ -9,8 +9,5 @@
     "test": "node --test 'test/*.test.js'",
     "secret-scan": "node scripts/secret-scan.mjs",
     "smoke": "node scripts/smoke.mjs"
-  },
-  "devDependencies": {
-    "parse5": "^7.2.1"
   }
 }
