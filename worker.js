@@ -698,7 +698,8 @@ function serverCard(t, base, lang) {
   b += `<button class="btn mini ghost" data-d="${t.id}">${esc(s.details)}</button>`;
   if (t.downloadable) {
     const fileBase = `${t.title || "track"}${t.artist ? " - " + t.artist : ""}`;
-    b += `<a class="btn mini" data-dl="${t.id}" download="${esc(fileBase.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim())}" href="${base}/api/v1/download?id=${encodeURIComponent(sid)}">${esc(s.dl)}</a>`;
+    const fileExt = t.hasMp3 ? "mp3" : "m4a";
+    b += `<a class="btn mini" data-dl="${t.id}" data-direct="${t.hasProgressive ? "1" : "0"}" download="${esc(fileBase.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim())}.${fileExt}" href="${base}/api/v1/download?id=${encodeURIComponent(sid)}">${esc(s.dl)}</a>`;
     if (t.hasHls && !t.hasMp3) b += `<span class="badge">${esc(s.noMp3)}</span>`;
   }
   return b + `</div></div>`;
@@ -916,8 +917,8 @@ b+='</div></div><div class="actions">';
 if(t.streamable)b+='<button class="btn mini ghost" data-p="'+t.id+'">'+T.prev+'</button>';
 b+='<button class="btn mini ghost" data-d="'+t.id+'">'+T.details+'</button>';
 if(t.downloadable){var fb=(t.title||'track')+(t.artist?(' - '+t.artist):'');
-var fb2=fb.replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim();
-b+='<a class="btn mini" data-dl="'+t.id+'" download="'+es(fb2)+'" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a>';
+var fb2=fb.replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim()+(t.hasMp3?'.mp3':'.m4a');
+b+='<a class="btn mini" data-dl="'+t.id+'" data-direct="'+(t.hasProgressive?'1':'0')+'" download="'+es(fb2)+'" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a>';
 if(t.hasHls&&!t.hasMp3)b+='<span class="badge">'+T.noMp3+'</span>'}
 b+='</div></div>';return b}
 function openModal(id){var t=DATA[id];if(!t)return;
@@ -943,7 +944,8 @@ h.loadSource('/api/v1/hls?id='+encodeURIComponent(t.sid));h.attachMedia(av);
 document.getElementById('mdesc').innerHTML=t.description?'<div class="desc">'+es(t.description)+'</div>':'';
 var rows='';
 if(t.downloadable){var fb=(t.title||'track')+(t.artist?(' - '+t.artist):'').replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim();
-rows+='<div class="dlrow"><span class="l">'+T.dl+(t.hasHls&&!t.hasMp3?' <span class="badge">'+T.noMp3+'</span>':'')+'</span><a class="btn mini" data-dl="'+t.id+'" download="'+es(fb)+'" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a></div>';
+var fe=t.hasMp3?'.mp3':'.m4a';
+rows+='<div class="dlrow"><span class="l">'+T.dl+(t.hasHls&&!t.hasMp3?' <span class="badge">'+T.noMp3+'</span>':'')+'</span><a class="btn mini" data-dl="'+t.id+'" data-direct="'+(t.hasProgressive?'1':'0')+'" download="'+es(fb+fe)+'" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a></div>';
 if(t.hasHls&&!t.hasMp3)rows+='<div class="dlrow"><span class="l">'+T.toMp3+'</span><button class="btn mini ghost" data-mp3="'+t.id+'">'+T.conv+'</button></div>'}
 if(t.page_url)rows+='<div class="dlrow"><span class="l">SoundCloud</span><a class="btn mini ghost" href="'+t.page_url+'" target="_blank" rel="noopener">'+T.open+'</a></div>';
 document.getElementById('mdl').innerHTML=rows;
@@ -985,7 +987,11 @@ var d=e.target.closest('[data-d]');if(d){openModal(d.getAttribute('data-d'));ret
 var mp3=e.target.closest('[data-mp3]');if(mp3){e.preventDefault();convertMp3(mp3.getAttribute('data-mp3'),mp3);return}
 // Download: default <a download> lets the browser save directly. Only intercept
 // when the track needs browser-side HLS segment assembly (mode:"browser").
-var dl=e.target.closest('[data-dl]');if(dl){maybeBrowserDl(e,dl);return}
+var dl=e.target.closest('[data-dl]');if(dl){
+// Progressive tracks already have a real native attachment URL. Do not await
+// anything and do not cancel the user gesture: mobile saves the .mp3 natively.
+if(dl.getAttribute('data-direct')==='1')return;
+maybeBrowserDl(e,dl);return}
 })}catch(e){show(e.message)}
 // If mode is "browser", prevent the plain navigation and assemble via hls-seg.
 // Otherwise let the native download proceed (real file save).
@@ -1271,7 +1277,7 @@ export default {
         if (url.searchParams.get("deep") === "1") {
           try { await sc.init(); ok = true; } catch { ok = false; }
         }
-        return json({ status: "ok", version: "2.1.3-20261024-0230", kv: !!kv,
+        return json({ status: "ok", version: "2.1.4-20261024-0300", kv: !!kv,
           soundcloud: { configured: true, healthy: ok } }, {}, reqId);
       }
       if (path === "/openapi.json" && request.method === "GET")

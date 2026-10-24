@@ -17,6 +17,35 @@ test("GET / text/html returns HTML with CSP nonce", async () => {
     assert.ok(body.includes(`id="${id}"`), `missing ${id}`);
 });
 
+test("download links preserve native browser save for progressive tracks", async () => {
+  const html = await (await worker.fetch(req("/"), env)).text();
+  assert.match(html, /data-direct=/);
+  assert.doesNotMatch(html, /data-direct="1"[^>]*target=/i);
+  assert.match(html, /if\(dl\.getAttribute\('data-direct'\)==='1'\)return/);
+});
+
+test("server-rendered progressive download link is native and carries .mp3", async () => {
+  const originalFetch = globalThis.fetch;
+  const track = {
+    id: 123, kind: "track", streamable: true, title: "Test Track", duration: 1000,
+    created_at: "2025-01-01T00:00:00Z", genre: "", permalink_url: "https://soundcloud.com/a/test",
+    artwork_url: "https://i1.sndcdn.com/a-large.jpg", user: { username: "Artist", avatar_url: "https://i1.sndcdn.com/u-large.jpg" },
+    media: { transcodings: [{ format: { protocol: "progressive", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc" }] }
+  };
+  globalThis.fetch = async (input) => {
+    const u = String(input);
+    if (u === "https://soundcloud.com/") return new Response('<script src="https://a-v2.sndcdn.com/assets/a.js"></script>');
+    if (u.startsWith("https://a-v2.sndcdn.com/assets/")) return new Response('x,client_id:"cid"');
+    if (u.includes("search/tracks")) return Response.json({ collection: [track] });
+    return Response.json({}, { status: 404 });
+  };
+  try {
+    const html = await (await worker.fetch(req("/?q=test", { Accept: "text/html" }), env)).text();
+    assert.match(html, /data-direct="1"[^>]*download="Test Track - Artist\.mp3"/);
+    assert.match(html, /href="https:\/\/w\.test\/api\/v1\/download\?id=123"/);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test("no stray opacity:0 (only reveal/modal/pbtn)", async () => {
   const r = await worker.fetch(req("/", { Accept: "text/html" }), env);
   const html = await r.text();
