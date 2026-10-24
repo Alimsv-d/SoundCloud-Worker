@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import worker from "../worker.js";
+import worker, { SoundCloud } from "../worker.js";
 
 const env = { MAX_DOWNLOAD_MB: "100" };
 const req = (path, headers = {}, method = "GET") => new Request(`https://w.test${path}`, { headers, method });
@@ -28,6 +28,31 @@ test("no stray opacity:0 (only reveal/modal/pbtn)", async () => {
   assert.equal(html.split("opacity:0").length - 1, allowed, "stray opacity:0");
   assert.ok(html.includes("[hidden]{display:none!important}"));
   assert.ok(!/on(click|error|load|submit)=/i.test(html), "inline handler");
+});
+
+test("all inline scripts in rendered HTML parse", async () => {
+  const html = await (await worker.fetch(req("/", { Accept: "text/html" }), env)).text();
+  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+    .map(m => m[1]).filter(s => s.trim());
+  assert.ok(scripts.length >= 2);
+  for (const [i, script] of scripts.entries()) {
+    assert.doesNotThrow(() => new Function(script), `inline script ${i} has syntax error`);
+  }
+});
+
+test("interactive list has delegated preview and detail handlers", async () => {
+  const html = await (await worker.fetch(req("/", { Accept: "text/html" }), env)).text();
+  assert.match(html, /e\.target\.closest\('\[data-p\]'\)/);
+  assert.match(html, /e\.target\.closest\('\[data-d\]'\)/);
+  assert.match(html, /openModal\(pid\)/);
+  assert.match(html, /mplayer.*audio/s);
+});
+
+test("server-rendered shell supports no-JS search contract", async () => {
+  const html = await (await worker.fetch(req("/", { Accept: "text/html" }), env)).text();
+  assert.match(html, /action="\/" method="get"/);
+  assert.match(html, /id="seed"/);
+  assert.match(html, /id="results"/);
 });
 
 test("no github link; rtl + telegram footer", async () => {
@@ -68,6 +93,30 @@ test("cover blocks non-soundcloud host", async () => {
 test("openapi has no github", async () => {
   const t = await (await worker.fetch(req("/openapi.json"), env)).text();
   assert.ok(!/github\.com/i.test(t));
+});
+
+test("media resolution returns no file for HLS-only tracks", async () => {
+  const sc = new SoundCloud("fixed-client-id");
+  const m = { media: { transcodings: [{ format: { protocol: "hls", mime_type: "audio/mp4" } }] } };
+  assert.equal(await sc._resolveMedia(m, false), null);
+});
+
+test("media resolution keeps progressive stream as a real file", async () => {
+  const sc = new SoundCloud("fixed-client-id");
+  const m = { track_authorization: "x", media: { transcodings: [
+    { format: { protocol: "hls", mime_type: "audio/mp4" }, url: "https://hls.example" },
+    { format: { protocol: "progressive", mime_type: "audio/mpeg" }, url: "https://progressive.example" },
+  ] } };
+  const originalFetch = globalThis.fetch;
+  let requested = "";
+  globalThis.fetch = async (u) => { requested = String(u); return Response.json({ url: "https://cf-media.sndcdn.com/song.mp3" }); };
+  try {
+    const media = await sc._resolveMedia(m, false);
+    assert.equal(media.file, true);
+    assert.equal(media.hls, undefined);
+    assert.equal(media.url, "https://cf-media.sndcdn.com/song.mp3");
+    assert.ok(requested.startsWith("https://progressive.example"));
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("API_KEYS enforcement", async () => {

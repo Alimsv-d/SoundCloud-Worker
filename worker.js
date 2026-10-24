@@ -71,37 +71,58 @@ const err = (c, extra = {}, reqId) => {
 const SC = "https://soundcloud.com/";
 const SC_API = "https://api-v2.soundcloud.com/";
 const SC_AUTH = "https://api-auth.soundcloud.com/";
+let SC_CID_CACHE = null;
+let SC_CID_CACHE_UNTIL = 0;
+let SC_CID_PENDING = null;
 
 class SoundCloud {
-  constructor(kv) { this.clientId = null; this.kv = kv; }
+  constructor(clientIdOrKv = null, kv = null) {
+    // Backward compatible: new SoundCloud(kv) and new SoundCloud(clientId, kv).
+    if (clientIdOrKv && typeof clientIdOrKv.get === "function" && kv == null) {
+      this.clientId = null; this.kv = clientIdOrKv;
+    } else {
+      this.clientId = clientIdOrKv || null; this.kv = kv;
+    }
+  }
 
   async init() {
-    // Try cached / secret / validate-then-scrape (original order).
-    if (this.kv) { try { const c = await this.kv.get("sc:cid"); if (c) { this.clientId = c; } } catch {} }
-    if (!this.clientId) await this.setClientId();
-    // Validate; if dead, rescrape once.
-    if (!await this.checkClientId()) await this.setClientId();
+    if (this.clientId) return this.clientId;
+    if (SC_CID_CACHE && Date.now() < SC_CID_CACHE_UNTIL) {
+      this.clientId = SC_CID_CACHE;
+      return this.clientId;
+    }
+    if (this.kv) { try { const c = await this.kv.get("sc:cid"); if (c) {
+      this.clientId = c; SC_CID_CACHE = c; SC_CID_CACHE_UNTIL = Date.now() + 45 * 60 * 1000; return c;
+    } } catch {} }
+    return this.setClientId();
   }
 
   async setClientId() {
-    const page = await (await fetch(SC, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } })).text();
-    const assets = [...page.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^."]+\.js)"/g)];
-    if (!assets.length) throw new Error("no assets");
-    // Try last two assets for resilience.
-    for (let i = assets.length - 1; i >= Math.max(0, assets.length - 3); i--) {
-      try {
-        const ac = await (await fetch(assets[i][1])).text();
-        const ids = [...ac.matchAll(/[,{]client_id:"([^"]+)"/g)];
-        if (ids.length) {
-          this.clientId = ids[Math.floor(Math.random() * ids.length)][1];
-          if (this.kv) try { await this.kv.put("sc:cid", this.clientId, { expirationTtl: 3600 }); } catch {}
-          return this.clientId;
-        }
-      } catch {}
+    if (SC_CID_PENDING) {
+      this.clientId = await SC_CID_PENDING;
+      return this.clientId;
     }
-    throw new Error("Could not find client ID");
+    SC_CID_PENDING = (async () => {
+      const page = await (await fetch(SC, { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" } })).text();
+      const assets = [...page.matchAll(/src="(https:\/\/a-v2\.sndcdn\.com\/assets\/[^.\"]+\.js)"/g)];
+      if (!assets.length) throw new Error("no assets");
+      for (let i = assets.length - 1; i >= Math.max(0, assets.length - 3); i--) {
+        try {
+          const ac = await (await fetch(assets[i][1])).text();
+          const ids = [...ac.matchAll(/[,{]client_id:"([^\"]+)"/g)];
+          if (ids.length) {
+            const cid = ids[Math.floor(Math.random() * ids.length)][1];
+            SC_CID_CACHE = cid; SC_CID_CACHE_UNTIL = Date.now() + 45 * 60 * 1000;
+            if (this.kv) try { await this.kv.put("sc:cid", cid, { expirationTtl: 3600 }); } catch {}
+            return cid;
+          }
+        } catch {}
+      }
+      throw new Error("Could not find client ID");
+    })();
+    try { this.clientId = await SC_CID_PENDING; return this.clientId; }
+    finally { SC_CID_PENDING = null; }
   }
-
   async getClientId() {
     if (!this.clientId) await this.setClientId();
     return this.clientId;
@@ -126,6 +147,7 @@ class SoundCloud {
       if (res.status === 401 || res.status === 403) {
         // client_id rotated -> force rescrape and retry
         this.clientId = null;
+        SC_CID_CACHE = null; SC_CID_CACHE_UNTIL = 0;
         if (this.kv) try { await this.kv.delete("sc:cid"); } catch {}
         last = res; continue;
       }
@@ -144,7 +166,10 @@ class SoundCloud {
       artist: m.user?.username || null, duration_ms: m.duration || null,
       cover: art || null, page_url: m.permalink_url,
       genre: m.genre || null, license: m.license || null,
-      streamable: !!m.streamable, downloadable: !!(m.downloadable && m.download_url) || !!m.streamable,
+      streamable: !!m.streamable,
+      hasProgressive: (m.media?.transcodings || []).some(x => x.format?.protocol === "progressive"),
+      hasHls: (m.media?.transcodings || []).some(x => /hls/i.test(x.format?.protocol || "")),
+      downloadable: !!m.streamable || !!(m.downloadable && m.download_url),
       plays: m.playback_count || null, likes: m.likes_count || null,
       reposts: m.reposts_count || null, comments: m.comment_count || null,
       created_at: m.created_at || null,
@@ -161,11 +186,14 @@ class SoundCloud {
     return t;
   }
 
-  async searchMusic(query, { limit = 24, offset = 0 } = {}) {
-    const p = new URLSearchParams({ q: query, limit: String(limit),
-      offset: String(offset), linked_partitioning: "1", app_locale: "en" });
+  async searchMusic(query, { limit = 20, offset = 0 } = {}) {
+    const p = new URLSearchParams({
+      q: query, sc_a_id: "801c8a51-9227-40d9-9c11-ac16f6bca216", variant_ids: "",
+      facet: "genre", user_id: "367935-565481-285242-514567", limit: String(limit),
+      offset: String(offset), linked_partitioning: "1", app_version: "1667398191", app_locale: "en"
+    });
     const d = await this._get(`${SC_API}search/tracks?${p}`);
-    return (d.collection || []).filter(m => m.kind === "track").map(m => this._norm(m));
+    return (d.collection || []).filter(m => m.kind === "track" && m.streamable).map(m => this._norm(m));
   }
 
   async getMusic(id) {
@@ -174,11 +202,11 @@ class SoundCloud {
   }
 
   // Resolve the best playable media URL (prefers progressive mp3).
-  async streamUrl(id) {
+  async streamUrl(id, { allowHls = true } = {}) {
     const m = await this._get(`${SC_API}tracks/${id}`);
-    return this._resolveMedia(m);
+    return this._resolveMedia(m, allowHls);
   }
-  async _resolveMedia(m) {
+  async _resolveMedia(m, allowHls = true) {
     if (!m || !m.media?.transcodings) return null;
     const cid = await this.getClientId();
     // 1) true downloadable file
@@ -198,8 +226,9 @@ class SoundCloud {
         if (d.url) return { url: d.url, file: true };
       } catch {}
     }
-    // 3) fallback: first transcoding (may be HLS playlist)
-    const any = m.media.transcodings[0];
+    // 3) HLS is valid for preview, but is not a downloadable audio file.
+    if (!allowHls) return null;
+    const any = m.media.transcodings.find(t => /hls/i.test(t.format?.protocol || "")) || m.media.transcodings[0];
     if (any) {
       try {
         const d = await (await fetch(`${any.url}?client_id=${cid}&track_authorization=${m.track_authorization || ""}`)).json();
@@ -269,13 +298,81 @@ function cap(stream, max) {
     c.enqueue(value);
   }, cancel() { rd.cancel(); } });
 }
-async function proxyMedia(target, request, cfg, kind) {
+
+function resolvePlaylistUri(uri, manifestUrl) {
+  try { return new URL(uri, manifestUrl).toString(); } catch { return null; }
+}
+
+async function fetchHlsParts(manifestUrl, request, cfg) {
+  const maxBytes = cfg.maxDownloadMB * 1048576;
+  const maxSegments = Math.max(1, parseInt(cfg.maxHlsSegments || 1500, 10));
+  const manifestRes = await fetchMedia(manifestUrl, request, cfg);
+  if (!manifestRes.ok) throw new PErr("hls-manifest", manifestRes.status);
+  const manifestText = await manifestRes.text();
+  if (!manifestText.startsWith("#EXTM3U")) throw new PErr("not-hls", 400);
+  if (manifestText.length > 1024 * 1024) throw new PErr("hls-large", 413);
+  const lines = manifestText.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const mapLine = lines.find(l => l.startsWith("#EXT-X-MAP:"));
+  const initUri = mapLine && mapLine.match(/URI="([^"]+)"/)?.[1];
+  const initUrl = initUri ? resolvePlaylistUri(initUri, manifestUrl) : null;
+  if (!initUrl || !validMedia(initUrl)) throw new PErr("hls-map", 400);
+  const parts = [initUrl];
+  for (const line of lines) {
+    if (line.startsWith("#")) continue;
+    const u = resolvePlaylistUri(line, manifestUrl);
+    if (!u || !validMedia(u)) throw new PErr("hls-segment", 400);
+    parts.push(u);
+  }
+  if (parts.length > maxSegments) throw new PErr("hls-many", 413);
+
+  let partIndex = 0, reader = null, sent = 0;
+  const stream = new ReadableStream({
+    async pull(c) {
+      try {
+        while (true) {
+          if (!reader) {
+            if (partIndex >= parts.length) return c.close();
+            const res = await fetchMedia(parts[partIndex++], request, cfg);
+            if (!res.ok) throw new PErr("hls-part", res.status);
+            reader = res.body.getReader();
+          }
+          const { done, value } = await reader.read();
+          if (done) { reader = null; continue; }
+          sent += value.byteLength;
+          if (sent > maxBytes) { c.error(new PErr("big", 413)); try { reader.cancel(); } catch {} return; }
+          return c.enqueue(value);
+        }
+      } catch (e) { c.error(e); }
+    },
+    cancel() { try { reader?.cancel(); } catch {} }
+  });
+  return { stream, bytes: null };
+}
+
+async function proxyHlsAsAudio(manifestUrl, request, cfg, filenameBase) {
+  try {
+    const { stream } = await fetchHlsParts(manifestUrl, request, cfg);
+    const h = new Headers();
+    h.set("Content-Type", "audio/mp4");
+    h.set("X-Content-Type-Options", "nosniff");
+    h.set("Cache-Control", "public, max-age=3600");
+    if (filenameBase) h.set("Content-Disposition",
+      `attachment; filename*=UTF-8''${encodeURIComponent(filenameBase.replace(/[^\w؀-ۿ -]/g, "_"))}.m4a`);
+    return new Response(stream, { status: 200, headers: h });
+  } catch (e) {
+    if (e instanceof PErr) return err(e.status === 413 ? "TOO_LARGE" : "NOT_DOWNLOADABLE", { detail: e.message });
+    return err("UPSTREAM", { detail: String(e?.message || e) });
+  }
+}
+async function proxyMedia(target, request, cfg, kind, { strictAudio = false } = {}) {
   let res;
   try { res = await fetchMedia(target, request, cfg); }
   catch (e) { return err("UPSTREAM", { detail: e.message }); }
   if (!res.ok && res.status !== 206) return err("UPSTREAM", { upstream_status: res.status });
   const ct = res.headers.get("Content-Type") || "";
-  if (!(kind === "audio" ? AUDIO : IMAGE).test(ct)) return err("UPSTREAM", { detail: "content-type" });
+  if (strictAudio && (!/^audio\\//i.test(ct) || /mpegurl|mpeg-url/i.test(ct)))
+    return err("NOT_DOWNLOADABLE", { detail: "SoundCloud returned a stream manifest, not an audio file" });
+  if (!(kind === "image" ? IMAGE.test(ct) : AUDIO.test(ct))) return err("UPSTREAM", { detail: "content-type" });
   const max = cfg.maxDownloadMB * 1048576;
   const cl = parseInt(res.headers.get("Content-Length") || "0", 10);
   if (cl > max) return err("TOO_LARGE", { max_mb: cfg.maxDownloadMB });
@@ -306,7 +403,7 @@ const STR = {
     ph: "نام آهنگ یا هنرمند… مثلاً امیر تتلو", btn: "جستجو",
     prev: "پیش‌نمایش", dl: "دانلود", open: "باز کردن در SoundCloud", details: "جزئیات",
     loading: "در حال جستجو…", none: "چیزی پیدا نشد؛ عبارت دیگری امتحان کنید",
-    net: "خطا در ارتباط؛ دوباره تلاش کنید",
+    net: "خطا در ارتباط؛ دوباره تلاش کنید", hls: "این ترک فقط پخش آنلاین SoundCloud دارد و فایل مستقیم قابل دانلود نیست.",
     desc: "توضیحات", plays: "پخش", likes: "لایک", genre: "سبک", lic: "مجوز",
     opts: "دانلود", close: "بستن", artist: "هنرمند", recent: "جستجوهای اخیر",
     howT: "چطور کار می‌کند؟",
@@ -323,7 +420,7 @@ const STR = {
     ph: "Track or artist… e.g. tataloo", btn: "Search",
     prev: "Preview", dl: "Download", open: "Open on SoundCloud", details: "Details",
     loading: "Searching…", none: "Nothing found; try another query",
-    net: "Connection error; please retry",
+    net: "Connection error; please retry", hls: "This track is only available as a SoundCloud stream; no direct audio file is available.",
     desc: "Description", plays: "Plays", likes: "Likes", genre: "Genre", lic: "License",
     opts: "Download", close: "Close", artist: "Artist", recent: "Recent searches",
     howT: "How it works",
@@ -359,7 +456,7 @@ function serverCard(t, base, lang) {
   b += `</div></div><div class="actions">`;
   if (t.streamable) b += `<button class="btn mini ghost" data-p="${t.id}">${esc(s.prev)}</button>`;
   b += `<button class="btn mini ghost" data-d="${t.id}">${esc(s.details)}</button>`;
-  if (t.streamable || t.downloadable) b += `<a class="btn mini" href="${base}/api/v1/download?id=${encodeURIComponent(sid)}">${esc(s.dl)}</a>`;
+  if (t.downloadable) b += `<a class="btn mini" href="${base}/api/v1/download?id=${encodeURIComponent(sid)}">${esc(s.dl)}</a>`;;
   return b + `</div></div>`;
 }
 
@@ -553,13 +650,13 @@ const media  = await sc.streamUrl(tracks[0].sid);</pre>
 var L=${JSON.stringify(lang)},T={loading:${JSON.stringify(s.loading)},none:${JSON.stringify(s.none)},
 net:${JSON.stringify(s.net)},prev:${JSON.stringify(s.prev)},dl:${JSON.stringify(s.dl)},open:${JSON.stringify(s.open)},
 details:${JSON.stringify(s.details)},desc:${JSON.stringify(s.desc)},opts:${JSON.stringify(s.opts)},
-plays:${JSON.stringify(s.plays)},likes:${JSON.stringify(s.likes)},recent:${JSON.stringify(s.recent)}};
+plays:${JSON.stringify(s.plays)},likes:${JSON.stringify(s.likes)},recent:${JSON.stringify(s.recent)},hls:${JSON.stringify(s.hls)} };
 var DATA={};
 // Seed DATA with server-rendered results so modal works pre-search.
 try{var seed=JSON.parse(document.getElementById('seed').textContent||'[]');
 seed.forEach(function(t){t.sid=t.sid||t.id.replace(/^sc_/,'');t.duration=t.duration_ms?fmtms(t.duration_ms):'';DATA[t.id]=t});}catch(e){}
 function fmtms(ms){var s=Math.round(ms/1000),m=Math.floor(s/60),r=s%60;var o=m+':'+String(r).padStart(2,'0');return L==='fa'?o.replace(/[0-9]/g,function(d){return '۰۱۲۳۴۵۶۷۸۹'[d]}):o}
-function show(m){try{var d=document.getElementById('dbg');if(location.search.indexOf('debug=1')>-1){d.style.display='block';d.textContent+=m+'\n'}}catch(e){}}
+function show(m){try{var d=document.getElementById('dbg');if(location.search.indexOf('debug=1')>-1){d.style.display='block';d.textContent+=m+'\\n'}}catch(e){}}
 window.addEventListener('error',function(e){show('ERR: '+e.message+' @'+e.lineno)});
 try{var b=document.getElementById('burger'),n=document.getElementById('nav');
 if(b)b.addEventListener('click',function(){n.classList.toggle('open');b.setAttribute('aria-expanded',n.classList.contains('open'))})}catch(e){show(e.message)}
@@ -603,7 +700,7 @@ var st='';if(t.plays)st+='<span>▶ '+fd(t.plays)+' '+T.plays+'</span>';if(t.lik
 document.getElementById('mstat').innerHTML=st;
 var bg='';if(t.genre)bg+='<span class="badge">'+es(t.genre)+'</span>';if(t.license)bg+='<span class="badge">'+es(t.license)+'</span>';if(t.tag_list)bg+='<span class="badge">'+es(t.tag_list)+'</span>';
 document.getElementById('mbadges').innerHTML=bg;
-document.getElementById('mplayer').innerHTML=t.streamable?'<audio controls preload="none" src="/api/v1/stream?id='+encodeURIComponent(t.sid)+'"></audio>':'';
+document.getElementById('mplayer').innerHTML=t.streamable?'<audio controls preload="none" src="/api/v1/stream?id='+encodeURIComponent(t.sid)+'"></audio>':(t.page_url?'<div class="desc">'+T.hls+'</div>':'');
 document.getElementById('mdesc').innerHTML=t.description?'<div class="desc">'+es(t.description)+'</div>':'';
 var rows='';
 if(t.downloadable)rows+='<div class="dlrow"><span class="l">'+T.dl+'</span><a class="btn mini" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a></div>';
@@ -616,7 +713,7 @@ var k=d.track;if(!k)return;
 if(k.description)document.getElementById('mdesc').innerHTML='<div class="desc">'+es(k.description)+'</div>';
 var b2='';if(k.genre)b2+='<span class="badge">'+es(k.genre)+'</span>';if(k.license)b2+='<span class="badge">'+es(k.license)+'</span>';if(k.tag_list)b2+='<span class="badge">'+es(k.tag_list)+'</span>';
 if(b2)document.getElementById('mbadges').innerHTML=b2;
-}).catch(function(){})}}
+}).catch(function(){})}
 try{var form=document.getElementById('sform'),out=document.getElementById('results');
 form.addEventListener('submit',function(ev){ev.preventDefault();
 var q=document.getElementById('q').value.trim();if(!q)return;addRecent(q);
@@ -668,14 +765,15 @@ function present(t, base, lang) {
     duration: fmtDur(t.duration_ms, lang === "fa"), duration_ms: t.duration_ms,
     cover: t.cover, page_url: t.page_url, genre: t.genre, license: t.license,
     plays: t.plays, likes: t.likes, created_at: t.created_at,
-    streamable: t.streamable, downloadable: t.streamable || t.downloadable };
+    streamable: t.streamable, previewable: !!t.streamable, hasProgressive: !!t.hasProgressive,
+    hasHls: !!t.hasHls, downloadable: !!t.downloadable };
 }
 
 export default {
   async fetch(request, env) {
     const reqId = rid(), url = new URL(request.url), path = url.pathname;
     const cfg = getConfig(env), kv = env.CACHE_KV || null;
-    const sc = new SoundCloud(kv);
+    const sc = new SoundCloud(cfg.soundcloudClientId, kv);
     const cors = { 'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' };
     try {
@@ -710,7 +808,7 @@ export default {
       if (path === "/download-url" && request.method === "GET") {
         const id = need("id"); if (id instanceof Response) return id;
         return legacy(async () => {
-          const r = await sc.streamUrl(id);
+          const r = await sc.streamUrl(id, { allowHls: false });
           const m = await sc.getMusic(id);
           return r ? { status: true, download_url: r.url, title: m && m.title,
             duration: m && m.duration_ms, artwork: m && m.cover }
@@ -720,8 +818,8 @@ export default {
       if (path === "/direct-download" && request.method === "GET") {
         const id = need("id"); if (id instanceof Response) return id;
         await sc.init();
-        const r = await sc.streamUrl(id);
-        if (!r || !r.url) return new Response(JSON.stringify({ status: false, status_det: "INTERNAL_ERROR" }),
+        const r = await sc.streamUrl(id, { allowHls: false });
+        if (!r || !r.url) return new Response(JSON.stringify({ status: false, status_det: "NOT_DOWNLOADABLE" }),
           { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
         return Response.redirect(r.url, 302);
       }
@@ -807,7 +905,9 @@ export default {
           let m; try { m = await sc.getMusic(id); } catch { return err("UPSTREAM", {}, reqId); }
           if (!m) return err("NOT_FOUND", { id }, reqId);
           return json({ track: { ...present(m, url.origin, lang), description: m.description,
-            tag_list: m.tag_list, waveform_url: m.waveform_url, transcodings: m.transcodings } }, {}, reqId);
+            tag_list: m.tag_list, waveform_url: m.waveform_url, transcodings: m.transcodings,
+            hasProgressive: (m.transcodings || []).some(x => x.protocol === "progressive"),
+            downloadable: !!m.downloadable } }, {}, reqId);
         }
 
         if (path === "/api/v1/stream") {
@@ -815,7 +915,9 @@ export default {
           try { await sc.init(); } catch { return err("UPSTREAM", {}, reqId); }
           let r; try { r = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
           if (!r || !r.url) return err("NOT_FOUND", { id }, reqId);
-          return proxyMedia(r.url, request, cfg, "audio");
+          if (r.hls) return proxyHlsAsAudio(r.url, request, cfg, null);
+          const res = await proxyMedia(r.url, request, cfg, "audio");
+          return res;
         }
 
         if (path === "/api/v1/download") {
@@ -823,10 +925,11 @@ export default {
           try { await sc.init(); } catch { return err("UPSTREAM", {}, reqId); }
           const m = await sc.getMusic(id);
           if (!m) return err("NOT_FOUND", { id }, reqId);
-          // Resolve the real file: prefer true download_url, else progressive, else HLS.
+          // Resolve the real file: true download_url, progressive audio, or HLS reassembled as M4A.
           let r; try { r = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
           if (!r || !r.url) return err("NOT_DOWNLOADABLE", { id }, reqId);
-          const res = await proxyMedia(r.url, request, cfg, "audio");
+          if (r.hls) return proxyHlsAsAudio(r.url, request, cfg, m.title || "track");
+          const res = await proxyMedia(r.url, request, cfg, "audio", { strictAudio: true });
           if (res instanceof Response && res.ok) res.headers.set("Content-Disposition",
             `attachment; filename*=UTF-8''${encodeURIComponent((m.title || "track").replace(/[^\w؀-ۿ -]/g, "_"))}`);
           return res;
