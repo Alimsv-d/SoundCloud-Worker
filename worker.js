@@ -484,7 +484,8 @@ function hlsOut(mime) {
 function contentDisposition(filenameBase, ext) {
   // "Title - Artist.ext"; strip illegal chars, collapse spaces, drop trailing dot, <=120 chars.
   let clean = String(filenameBase || "track")
-    .replace(/[\\/:*?"<>|-]/g, " ")
+    .replace(/[\\/:*?"<>|]/g, " ")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ").trim().replace(/\.+$/, "").slice(0, 120) || "track";
   const ascii = clean.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_") || "track";
   return `attachment; filename="${ascii}.${ext}"; filename*=UTF-8''${encodeURIComponent(clean)}.${ext}`;
@@ -989,25 +990,31 @@ var dl=e.target.closest('[data-dl]');if(dl){maybeBrowserDl(e,dl);return}
 // If mode is "browser", prevent the plain navigation and assemble via hls-seg.
 // Otherwise let the native download proceed (real file save).
 async function maybeBrowserDl(e,el){
+// Intercept synchronously; otherwise navigation starts before the async check finishes.
+e.preventDefault();
 var id=el.getAttribute('data-dl'),sid=sidOf(id);
 try{
 var chk=await (await fetch('/api/v1/download?id='+encodeURIComponent(sid)+'&check=1')).json();
-if(chk&&chk.ok===false&&chk.error){e.preventDefault();alert(dlMsg()+' ('+(chk.error.code||'')+')');return}
-if(chk&&chk.mode==='browser'){e.preventDefault();startDownload(id,el);return}
-// direct: allow native download (no preventDefault)
-}catch(err){/* network hiccup -> let native try anyway */}
+if(chk&&chk.ok===false&&chk.error){alert(dlMsg()+' ('+(chk.error.code||'')+')');return}
+if(chk&&chk.mode==='browser'){startDownload(id,el,chk);return}
+if(chk&&chk.mode==='direct'){
+var a=document.createElement('a');a.href='/api/v1/download?id='+encodeURIComponent(sid);
+a.download=tname(id)+'.'+(chk.ext||'mp3');document.body.appendChild(a);a.click();a.remove();return;
+}
+throw new Error(chk.mode||'bad response');
+}catch(err){alert(dlMsg()+(err&&err.message?' ('+err.message+')':''))}
 }
 function tname(id){var t=DATA[id]&&DATA[id].title?DATA[id].title:'track';
 var ar=DATA[id]&&DATA[id].artist?(' - '+DATA[id].artist):'';
 return (t+ar).replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim()}
 function sidOf(id){return String(id).replace(/^sc_/,'')}
 function dlMsg(){return (L==='fa')?'خطا در دانلود':'Download failed'}
-async function startDownload(id,btn){
+async function startDownload(id,btn,chk){
 var sid=sidOf(id),orig=btn?btn.textContent:null;
 function prog(p){if(btn)btn.textContent=p}
 try{
 prog('…');
-var chk=await (await fetch('/api/v1/download?id='+encodeURIComponent(sid)+'&check=1')).json();
+chk=chk||await (await fetch('/api/v1/download?id='+encodeURIComponent(sid)+'&check=1')).json();
 if(!chk.ok&&chk.error){throw new Error((chk.error&&chk.error.code)||'err')}
 var ext=chk.ext||'mp3',blob;
 if(chk.mode==='browser'){
@@ -1252,7 +1259,7 @@ export default {
         if (url.searchParams.get("deep") === "1") {
           try { await sc.init(); ok = true; } catch { ok = false; }
         }
-        return json({ status: "ok", version: "2.1.1-20261024-0145", kv: !!kv,
+        return json({ status: "ok", version: "2.1.2-20261024-0210", kv: !!kv,
           soundcloud: { configured: true, healthy: ok } }, {}, reqId);
       }
       if (path === "/openapi.json" && request.method === "GET")
@@ -1302,7 +1309,23 @@ export default {
           try { await sc.init(); } catch { return err("UPSTREAM", {}, reqId); }
           let r; try { r = await sc.streamUrl(id); } catch { return err("UPSTREAM", {}, reqId); }
           if (!r || !r.url) return err("NOT_FOUND", { id }, reqId);
-          if (r.hls) return proxyHlsAsAudio(r.url, request, cfg, null, r.mime);
+          if (r.hls) {
+            // Never return a silent partial preview when the server-side HLS path
+            // would exceed the Worker subrequest budget. The UI uses hls.js +
+            // /api/v1/hls-seg for this case instead.
+            try {
+              const out = hlsOut(r.mime);
+              const parsed = parseHls(await fetchHlsText(r.url, request, cfg), r.url,
+                out.needsMap, cfg.maxHlsSegments);
+              if (parsed.segCount + 6 > cfg.subrequestLimit)
+                return err("TRACK_TOO_LONG", { mode: "browser", segments: parsed.segCount,
+                  max_direct_seconds: Math.floor((cfg.subrequestLimit - 6) *
+                    (parsed.durSec / Math.max(1, parsed.segCount))) }, reqId);
+            } catch (e) {
+              return err("UPSTREAM", { detail: e.message }, reqId);
+            }
+            return proxyHlsAsAudio(r.url, request, cfg, null, r.mime);
+          }
           const res = await proxyMedia(r.url, request, cfg, "audio");
           return res;
         }
@@ -1420,7 +1443,7 @@ export default {
           }
           if (!best) return err("UPSTREAM", { detail: "no playable hls" }, reqId);
 
-          const needed = best.segCount + overhead;
+          const needed = best.segCount + overhead + (hlsTrs.length * 2);
           const fits = needed <= cfg.subrequestLimit;
           const mode = fits ? "direct" : cfg.longTrackMode;
 

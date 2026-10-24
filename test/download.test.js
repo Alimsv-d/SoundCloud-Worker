@@ -226,6 +226,22 @@ test("regression: strictAudio accepts audio/mpeg (was i is not defined)", async 
   } finally { restore(); }
 });
 
+test("long HLS preview refuses server-side partial streaming", async () => {
+  const e2 = { MAX_DOWNLOAD_MB: "100", SUBREQUEST_LIMIT: "5" };
+  const segs = Array.from({ length: 20 }, (_, i) => `#EXTINF:6\ns${i}.mp3`).join("\n");
+  const m = TRACK({ media: { transcodings: [{ format: { protocol: "hls", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc/h" }] } });
+  const restore = fakeFetch([...baseH,
+    [u => /tracks\/1(\\?|$)/.test(u), () => Response.json(m)],
+    [u => u.startsWith("https://api-v2.soundcloud.com/tc/h"), () => Response.json({ url: "https://cf-hls.sndcdn.com/pl.m3u8" })],
+    [u => u === "https://cf-hls.sndcdn.com/pl.m3u8", () => new Response("#EXTM3U\n" + segs + "\n#EXT-X-ENDLIST")],
+  ]);
+  try {
+    const r = await worker.fetch(req("/api/v1/stream?id=1"), e2);
+    assert.equal(r.status, 413);
+    assert.equal((await r.json()).error.code, "TRACK_TOO_LONG");
+  } finally { restore(); }
+});
+
 test("hls-seg proxy blocks non-SoundCloud hosts (SSRF)", async () => {
   const r = await worker.fetch(req("/api/v1/hls-seg?u=" + encodeURIComponent("https://evil.com/s")), env);
   assert.equal(r.status, 400);
