@@ -190,6 +190,9 @@ class SoundCloud {
       streamable: !!m.streamable,
       hasProgressive: (m.media?.transcodings || []).some(x => x.format?.protocol === "progressive"),
       hasHls: (m.media?.transcodings || []).some(x => /hls/i.test(x.format?.protocol || "")),
+      hasMp3: (m.media?.transcodings || []).some(x =>
+        (x.format?.protocol === "progressive" || /hls/i.test(x.format?.protocol || "")) &&
+        /mpeg|mp3/i.test(x.format?.mime_type || "") && !/mpegurl/i.test(x.format?.mime_type || "")),
       downloadable: !!m.streamable || !!(m.downloadable && m.download_url),
       plays: m.playback_count || null, likes: m.likes_count || null,
       reposts: m.reposts_count || null, comments: m.comment_count || null,
@@ -266,9 +269,21 @@ class SoundCloud {
     return r && r.hls ? { manifest: r.url, mime: r.mime } : null;
   }
 
-  // Return all HLS transcodings (url + mime) for a track object, for segment-count pick.
+  // Return HLS transcodings (not the master mpegurl playlist) for a track object.
+  // Ordered by preference: audio/mpeg (mp3) first, then aac/mp4, then ogg/opus.
   _hlsTranscodings(m) {
-    return (m?.media?.transcodings || []).filter(t => /hls/i.test(t.format?.protocol || ""));
+    const rank = (mt) => {
+      const x = (mt || "").toLowerCase();
+      if (/mpeg(?!url)|mp3/.test(x) && !/mpegurl/.test(x)) return 0; // real mp3 stream
+      if (/mp4|aac|x-m4a/.test(x)) return 1;                          // AAC in mp4
+      if (/ogg|opus/.test(x)) return 2;                               // opus/ogg
+      if (/mpegurl/.test(x)) return 99;                               // master playlist, skip
+      return 5;
+    };
+    return (m?.media?.transcodings || [])
+      .filter(t => /hls/i.test(t.format?.protocol || ""))
+      .filter(t => !/encrypted/i.test(t.format?.protocol || "")) // skip DRM
+      .sort((a, b) => rank(a.format?.mime_type) - rank(b.format?.mime_type));
   }
   // Resolve a transcoding's playable manifest URL (one subrequest).
   async _transcodingUrl(tr, m) {
@@ -443,7 +458,10 @@ function hlsOut(mime) {
 }
 
 function contentDisposition(filenameBase, ext) {
-  const clean = (filenameBase || "track").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").trim() || "track";
+  // "Title - Artist.ext"; strip illegal chars, collapse spaces, drop trailing dot, <=120 chars.
+  let clean = String(filenameBase || "track")
+    .replace(/[\\/:*?"<>|-]/g, " ")
+    .replace(/\s+/g, " ").trim().replace(/\.+$/, "").slice(0, 120) || "track";
   const ascii = clean.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_") || "track";
   return `attachment; filename="${ascii}.${ext}"; filename*=UTF-8''${encodeURIComponent(clean)}.${ext}`;
 }
@@ -486,7 +504,7 @@ async function fetchHlsText(manifestUrl, request, cfg) {
 // Concatenate already-parsed HLS parts into one audio stream.
 // If a segment fails mid-stream the stream is errored so the browser marks the
 // download FAILED rather than saving a short-but-"complete" file.
-function proxyHlsParts(parsed, request, cfg, filenameBase) {
+function proxyHlsParts(parsed, request, cfg, filenameBase, download = false) {
   try {
     const { initUrl, parts, out } = parsed;
     const queue = initUrl ? [initUrl, ...parts] : parts;
@@ -513,9 +531,9 @@ function proxyHlsParts(parsed, request, cfg, filenameBase) {
       cancel() { try { reader?.cancel(); } catch {} }
     });
     const h = new Headers();
-    h.set("Content-Type", out.ct);
+    h.set("Content-Type", download ? "application/octet-stream" : out.ct);
     h.set("X-Content-Type-Options", "nosniff");
-    h.set("Cache-Control", "public, max-age=3600");
+    h.set("Cache-Control", download ? "no-store" : "public, max-age=3600");
     applyCors(h);
     if (filenameBase) h.set("Content-Disposition", contentDisposition(filenameBase, out.ext));
     return new Response(stream, { status: 200, headers: h });
@@ -539,7 +557,8 @@ async function proxyHlsAsAudio(manifestUrl, request, cfg, filenameBase, mime) {
   }
 }
 
-async function proxyMedia(target, request, cfg, kind, { strictAudio = false, filenameBase = null, ext = null } = {}) {
+async function proxyMedia(target, request, cfg, kind,
+    { strictAudio = false, filenameBase = null, ext = null, download = false } = {}) {
   let res;
   try { res = await fetchMedia(target, request, cfg); }
   catch (e) { return err("UPSTREAM", { detail: e.message }); }
@@ -552,8 +571,11 @@ async function proxyMedia(target, request, cfg, kind, { strictAudio = false, fil
   const cl = parseInt(res.headers.get("Content-Length") || "0", 10);
   if (cl > max) return err("TOO_LARGE", { max_mb: cfg.maxDownloadMB });
   const h = new Headers();
-  h.set("Content-Type", ct); h.set("X-Content-Type-Options", "nosniff");
-  h.set("Cache-Control", "public, max-age=3600");
+  // Download responses force a real save (octet-stream + attachment + no-store);
+  // /api/v1/stream keeps the real audio/* type for the <audio> element.
+  h.set("Content-Type", download ? "application/octet-stream" : ct);
+  h.set("X-Content-Type-Options", "nosniff");
+  h.set("Cache-Control", download ? "no-store" : "public, max-age=3600");
   applyCors(h);
   if (res.headers.get("Accept-Ranges")) h.set("Accept-Ranges", res.headers.get("Accept-Ranges"));
   if (res.headers.get("Content-Range")) h.set("Content-Range", res.headers.get("Content-Range"));
@@ -594,6 +616,7 @@ const STR = {
     net: "خطا در ارتباط؛ دوباره تلاش کنید", hls: "این ترک فقط استریم آنلاین دارد؛ دانلود به‌صورت خودکار از بخش‌های استریم ساخته می‌شود.",
     desc: "توضیحات", plays: "پخش", likes: "لایک", genre: "سبک", lic: "مجوز",
     opts: "دانلود", close: "بستن", artist: "هنرمند", recent: "جستجوهای اخیر",
+    noMp3: "این ترک MP3 ندارد", toMp3: "تبدیل به MP3 (آزمایشی)", conv: "در حال تبدیل…",
     howT: "چطور کار می‌کند؟",
     howB: "این سرویس از API غیررسمی SoundCloud استفاده می‌کند؛ نام آهنگ یا هنرمند را جستجو کنید، پیش‌نمایش بشنوید و دانلود کنید. هیچ فایلی روی سرور ذخیره نمی‌شود.",
     apiT: "مستندات API", faqT: "سؤالات متداول", termsT: "قوانین",
@@ -612,6 +635,7 @@ const STR = {
     net: "Connection error; please retry", hls: "This track is stream-only; the download is assembled from stream segments automatically.",
     desc: "Description", plays: "Plays", likes: "Likes", genre: "Genre", lic: "License",
     opts: "Download", close: "Close", artist: "Artist", recent: "Recent searches",
+    noMp3: "No MP3 for this track", toMp3: "Convert to MP3 (experimental)", conv: "Converting…",
     howT: "How it works",
     howB: "Uses the unofficial SoundCloud API; search a track or artist, preview it and download it. Nothing is stored on the server.",
     apiT: "API Docs", faqT: "FAQ", termsT: "Terms",
@@ -647,7 +671,11 @@ function serverCard(t, base, lang) {
   b += `</div></div><div class="actions">`;
   if (t.streamable) b += `<button class="btn mini ghost" data-p="${t.id}">${esc(s.prev)}</button>`;
   b += `<button class="btn mini ghost" data-d="${t.id}">${esc(s.details)}</button>`;
-  if (t.downloadable) b += `<button class="btn mini" data-dl="${t.id}">${esc(s.dl)}</button>`;
+  if (t.downloadable) {
+    const fileBase = `${t.title || "track"}${t.artist ? " - " + t.artist : ""}`;
+    b += `<a class="btn mini" data-dl="${t.id}" download="${esc(fileBase.replace(/[\\/:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim())}" href="${base}/api/v1/download?id=${encodeURIComponent(sid)}">${esc(s.dl)}</a>`;
+    if (t.hasHls && !t.hasMp3) b += `<span class="badge">${esc(s.noMp3)}</span>`;
+  }
   return b + `</div></div>`;
 }
 
@@ -862,7 +890,10 @@ if(t.downloadable)b+='<span class="badge hot">'+T.dl+'</span>';
 b+='</div></div><div class="actions">';
 if(t.streamable)b+='<button class="btn mini ghost" data-p="'+t.id+'">'+T.prev+'</button>';
 b+='<button class="btn mini ghost" data-d="'+t.id+'">'+T.details+'</button>';
-if(t.downloadable)b+='<button class="btn mini" data-dl="'+t.id+'">'+T.dl+'</button>';
+if(t.downloadable){var fb=(t.title||'track')+(t.artist?(' - '+t.artist):'');
+var fb2=fb.replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim();
+b+='<a class="btn mini" data-dl="'+t.id+'" download="'+es(fb2)+'" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a>';
+if(t.hasHls&&!t.hasMp3)b+='<span class="badge">'+T.noMp3+'</span>'}
 b+='</div></div>';return b}
 function openModal(id){var t=DATA[id];if(!t)return;
 document.getElementById('mtitle').textContent=t.title||'';
@@ -886,7 +917,9 @@ h.loadSource('/api/v1/hls?id='+encodeURIComponent(t.sid));h.attachMedia(av);
 }else{document.getElementById('mplayer').innerHTML=t.page_url?'<div class="desc">'+T.hls+'</div>':''}
 document.getElementById('mdesc').innerHTML=t.description?'<div class="desc">'+es(t.description)+'</div>':'';
 var rows='';
-if(t.downloadable)rows+='<div class="dlrow"><span class="l">'+T.dl+'</span><button class="btn mini" data-dl="'+t.id+'">'+T.dl+'</button></div>';
+if(t.downloadable){var fb=(t.title||'track')+(t.artist?(' - '+t.artist):'').replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim();
+rows+='<div class="dlrow"><span class="l">'+T.dl+(t.hasHls&&!t.hasMp3?' <span class="badge">'+T.noMp3+'</span>':'')+'</span><a class="btn mini" data-dl="'+t.id+'" download="'+es(fb)+'" href="/api/v1/download?id='+encodeURIComponent(t.sid)+'">'+T.dl+'</a></div>';
+if(t.hasHls&&!t.hasMp3)rows+='<div class="dlrow"><span class="l">'+T.toMp3+'</span><button class="btn mini ghost" data-mp3="'+t.id+'">'+T.conv+'</button></div>'}
 if(t.page_url)rows+='<div class="dlrow"><span class="l">SoundCloud</span><a class="btn mini ghost" href="'+t.page_url+'" target="_blank" rel="noopener">'+T.open+'</a></div>';
 document.getElementById('mdl').innerHTML=rows;
 modal.classList.add('open');
@@ -923,29 +956,36 @@ if(b){
   return;
 }
 var d=e.target.closest('[data-d]');if(d){openModal(d.getAttribute('data-d'));return}
-// Download: probe ?check=1 first, then fetch with a progress bar, never a JSON page.
-var dl=e.target.closest('[data-dl]');if(dl){startDownload(dl.getAttribute('data-dl'),dl);return}
+// Optional MP3 conversion (experimental) for AAC/opus-only tracks.
+var mp3=e.target.closest('[data-mp3]');if(mp3){e.preventDefault();convertMp3(mp3.getAttribute('data-mp3'),mp3);return}
+// Download: default <a download> lets the browser save directly. Only intercept
+// when the track needs browser-side HLS segment assembly (mode:"browser").
+var dl=e.target.closest('[data-dl]');if(dl){maybeBrowserDl(e,dl);return}
 })}catch(e){show(e.message)}
+// If mode is "browser", prevent the plain navigation and assemble via hls-seg.
+// Otherwise let the native download proceed (real file save).
+async function maybeBrowserDl(e,el){
+var id=el.getAttribute('data-dl'),sid=sidOf(id);
+try{
+var chk=await (await fetch('/api/v1/download?id='+encodeURIComponent(sid)+'&check=1')).json();
+if(chk&&chk.ok===false&&chk.error){e.preventDefault();alert(dlMsg()+' ('+(chk.error.code||'')+')');return}
+if(chk&&chk.mode==='browser'){e.preventDefault();startDownload(id,el);return}
+// direct: allow native download (no preventDefault)
+}catch(err){/* network hiccup -> let native try anyway */}
+}
+function tname(id){var t=DATA[id]&&DATA[id].title?DATA[id].title:'track';
+var ar=DATA[id]&&DATA[id].artist?(' - '+DATA[id].artist):'';
+return (t+ar).replace(/[\\/:*?"<>|]+/g,' ').replace(/\s+/g,' ').trim()}
 function sidOf(id){return String(id).replace(/^sc_/,'')}
 function dlMsg(){return (L==='fa')?'خطا در دانلود':'Download failed'}
 async function startDownload(id,btn){
 var sid=sidOf(id),orig=btn?btn.textContent:null;
 function prog(p){if(btn)btn.textContent=p}
-function tname(){var t=DATA[id]&&DATA[id].title?DATA[id].title:'track';return t.replace(/[\\/:*?"<>|]/g,'_')}
 try{
 prog('…');
 var chk=await (await fetch('/api/v1/download?id='+encodeURIComponent(sid)+'&check=1')).json();
 if(!chk.ok&&chk.error){throw new Error((chk.error&&chk.error.code)||'err')}
 var ext=chk.ext||'mp3',blob;
-if(chk.mode==='direct'||chk.mode==='server'){
-// Direct: hand the URL to the browser's own download manager.
-prog('✓');
-var a0=document.createElement('a');
-a0.href='/api/v1/download?id='+encodeURIComponent(sid);
-a0.download=tname()+'.'+ext;
-document.body.appendChild(a0);a0.click();a0.remove();
-if(btn)setTimeout(function(){btn.textContent=orig},800);return;
-}
 if(chk.mode==='browser'){
 // Browser-side HLS: rewritten manifest, segments via /api/v1/hls-seg (concurrency 4).
 var man=await (await fetch('/api/v1/hls?id='+encodeURIComponent(sid))).text();
@@ -958,12 +998,41 @@ var ws=[];for(var i=0;i<CONC;i++)ws.push(w());await Promise.all(ws);
 blob=new Blob(parts);
 }else{throw new Error(chk.mode||'err')}
 var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-a.download=tname()+'.'+ext;
+a.download=tname(id)+'.'+ext;
 document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(a.href)},4000);
 if(btn)btn.textContent=orig;
 }catch(err){show('DL: '+err.message);if(btn)btn.textContent=orig;
 alert(dlMsg()+(err&&err.message?(' ('+err.message+')'):''))}
 }
+// Experimental: convert a AAC/opus-only track to MP3 in the browser (lamejs).
+// Not reachable unless the track has no MP3; never touches the direct path.
+async function convertMp3(id,btn){
+var sid=sidOf(id),orig=btn?btn.textContent:T.conv;
+if(!window.lamejs){await loadScript('https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.0/lame.min.js')}
+if(btn)btn.textContent=T.conv;
+try{
+var man=await (await fetch('/api/v1/hls?id='+encodeURIComponent(sid))).text();
+var urls=man.split('\\n').filter(function(l){var t=l.trim();return t&&t.indexOf('/api/v1/hls-seg')===0});
+if(urls.length>120){throw new Error('too long')}
+var ac=new (window.AudioContext||window.webkitAudioContext)();
+var bufs=[],idx=0,CONC=4;
+async function w(){while(idx<urls.length){var i=idx++;var r=await fetch(urls[i]);if(!r.ok)throw new Error('seg');var ab=await r.arrayBuffer();
+try{bufs.push(await ac.decodeAudioData(ab.slice(0)))}catch(e){/* init/keys */}
+if(btn)btn.textContent=Math.round(idx/urls.length*100)+'%'}}
+var ws=[];for(var i=0;i<CONC;i++)ws.push(w());await Promise.all(ws);
+if(!bufs.length)throw new Error('decode');
+var ch=bufs[0].numberOfChannels,sr=bufs[0].sampleRate,enc=new lamejs.Mp3Encoder(ch,sr,128),out=[];
+for(var b=0;b<bufs.length;b++){var l=bufs[b].getChannelData(0),r2=ch>1?bufs[b].getChannelData(1):l;
+out.push(enc.encodeBuffer(f32i(l),f32i(r2)))}
+out.push(enc.flush());
+var blob=new Blob(out,{type:'audio/mpeg'});
+var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=tname(id)+'.mp3';
+document.body.appendChild(a);a.click();a.remove();
+if(btn)btn.textContent=orig;
+}catch(err){show('MP3: '+err.message);if(btn)btn.textContent=orig;alert(dlMsg())}
+}
+function f32i(f){var o=new Int16Array(f.length);for(var i=0;i<f.length;i++)o[i]=Math.max(-32768,Math.min(32767,Math.round(f[i]*32768)));return o}
+function loadScript(src){return new Promise(function(res,rej){var s=document.createElement('script');s.src=src;s.addEventListener('load',res);s.addEventListener('error',rej);document.head.appendChild(s)})}
 })();
 </script>
 </body>
@@ -1053,7 +1122,7 @@ function present(t, base, lang) {
     cover: t.cover, page_url: t.page_url, genre: t.genre, license: t.license,
     plays: t.plays, likes: t.likes, created_at: t.created_at,
     streamable: t.streamable, previewable: !!t.streamable, hasProgressive: !!t.hasProgressive,
-    hasHls: !!t.hasHls, downloadable: !!t.downloadable };
+    hasHls: !!t.hasHls, hasMp3: !!t.hasMp3, downloadable: !!t.downloadable };
 }
 
 export default {
@@ -1159,7 +1228,8 @@ export default {
         if (url.searchParams.get("deep") === "1") {
           try { await sc.init(); ok = true; } catch { ok = false; }
         }
-        return json({ status: "ok", kv: !!kv, soundcloud: { configured: true, healthy: ok } }, {}, reqId);
+        return json({ status: "ok", version: "2.1.0-20261024-0130", kv: !!kv,
+          soundcloud: { configured: true, healthy: ok } }, {}, reqId);
       }
       if (path === "/openapi.json" && request.method === "GET")
         return json(openapiSpec(url.origin), {}, reqId);
@@ -1281,7 +1351,7 @@ export default {
           // Fetch track JSON ONCE (not via getMusic + streamUrl separately).
           let m; try { m = await sc._get(`${SC_API}tracks/${id}`); } catch { return err("UPSTREAM", {}, reqId); }
           if (!m || !m.id) return err("NOT_FOUND", { id }, reqId);
-          const title = m.title || "track";
+          const fname = `${m.title || "track"}${m.user && m.user.username ? " - " + m.user.username : ""}`;
           const check = url.searchParams.get("check") === "1";
           // Budget overhead already spent this request: client_id check + this track fetch.
           const overhead = 4;
@@ -1302,13 +1372,13 @@ export default {
               return json({ mode: "direct", ext: "mp3", size, segments: 0, hls: false }, {}, reqId);
             }
             return proxyMedia(r.url, request, cfg, "audio",
-              { strictAudio: true, filenameBase: title });
+              { strictAudio: true, filenameBase: fname, download: true });
           }
 
-          // 2) HLS-only: pick the transcoding with the FEWEST segments across formats.
+          // 2) HLS-only: prefer mp3, else fewest-segment AAC/opus (skip the master mpegurl).
           const hlsTrs = sc._hlsTranscodings(m);
           if (!hlsTrs.length) return err("NOT_DOWNLOADABLE", { id }, reqId);
-          let best = null; // {manifest, mime, segCount, durSec, initUrl, parts}
+          let best = null;
           for (const tr of hlsTrs) {
             try {
               const manUrl = await sc._transcodingUrl(tr, m);
@@ -1316,8 +1386,12 @@ export default {
               const out = hlsOut(tr.format?.mime_type);
               const txt = await fetchHlsText(manUrl, request, cfg);
               const parsed = parseHls(txt, manUrl, out.needsMap, cfg.maxHlsSegments);
-              if (!best || parsed.segCount < best.segCount)
+              // mp3 wins outright; otherwise prefer fewer segments.
+              const isMp3 = out.ext === "mp3";
+              if (!best || (isMp3 && best.out.ext !== "mp3") ||
+                  (out.ext === best.out.ext && parsed.segCount < best.segCount))
                 best = { manifest: manUrl, mime: tr.format?.mime_type, ...parsed, out };
+              if (isMp3) break; // found an mp3 — stop searching
             } catch { /* try next transcoding */ }
           }
           if (!best) return err("UPSTREAM", { detail: "no playable hls" }, reqId);
@@ -1349,7 +1423,7 @@ export default {
             }
             // mode === "direct": fall through and attempt anyway (Paid plans).
           }
-          return proxyHlsParts(best, request, cfg, title);
+          return proxyHlsParts(best, request, cfg, fname, true);
         }
 
         if (path === "/api/v1/cover") {

@@ -88,6 +88,7 @@ Cloudflare Workers به‌ازای هر درخواست یک سقف **subrequest*
   - `direct`: تلاش سروری (فقط روی Workers Paid امن است).
 - روی **Workers Paid** مقدار `SUBREQUEST_LIMIT` را بالا ببرید (مثلاً `5000`) و `LONG_TRACK_MODE=direct` بگذارید تا همه‌ی ترک‌ها سروری دانلود شوند.
 - بیشینه‌ی مدت تقریبی دانلود مستقیم روی پلن رایگان ≈ `SUBREQUEST_LIMIT` × مدت هر سگمنت (معمولاً ~۱۰ ثانیه) ≈ **چند دقیقه**.
+- خیلی از ترک‌های SoundCloud **MP3 مستقیم ندارند** و فقط AAC (m4a) استریم می‌شوند؛ برای این‌ها پسوند `.m4a` می‌گیرید و در UI برچسب «این ترک MP3 ندارد» دیده می‌شود. دکمه‌ی آزمایشی «تبدیل به MP3» این ترک‌ها را در مرورگر به MP3 تبدیل می‌کند (نیازمند مرورگر مدرن؛ روی همه‌ی دستگاه‌ها تست نشده است).
 
 ### کدهای خطا
 `BAD_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `RATE_LIMITED` `UPSTREAM_ERROR` `UPSTREAM_TIMEOUT` `PAYLOAD_TOO_LARGE` `NOT_DOWNLOADABLE` `TRACK_TOO_LONG` `INTERNAL_ERROR`

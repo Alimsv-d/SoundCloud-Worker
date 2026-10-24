@@ -37,7 +37,7 @@ test("progressive download returns audio + Content-Disposition", async () => {
   try {
     const r = await worker.fetch(dlReq(1), env);
     assert.equal(r.status, 200);
-    assert.equal(r.headers.get("Content-Type"), "audio/mpeg");
+    assert.equal(r.headers.get("Content-Type"), "application/octet-stream");
     const cd = r.headers.get("Content-Disposition") || "";
     assert.ok(/attachment/.test(cd) && /\.mp3/.test(cd) && /filename\*=UTF-8''/.test(cd));
     assert.equal(await r.text(), "MP3DATA");
@@ -56,7 +56,7 @@ test("HLS mp3 (no MAP) concatenates segments and uses .mp3", async () => {
   try {
     const r = await worker.fetch(dlReq(1), env);
     assert.equal(r.status, 200);
-    assert.equal(r.headers.get("Content-Type"), "audio/mpeg");
+    assert.equal(r.headers.get("Content-Type"), "application/octet-stream");
     assert.ok(/\.mp3/.test(r.headers.get("Content-Disposition") || ""));
     assert.equal(await r.text(), "MP3MP3");
   } finally { restore(); }
@@ -76,7 +76,7 @@ test("HLS mp4 with EXT-X-MAP includes init segment and uses .m4a", async () => {
   try {
     const r = await worker.fetch(dlReq(1), env);
     assert.equal(r.status, 200);
-    assert.equal(r.headers.get("Content-Type"), "audio/mp4");
+    assert.equal(r.headers.get("Content-Type"), "application/octet-stream");
     assert.ok(/\.m4a/.test(r.headers.get("Content-Disposition") || ""));
     assert.equal(await r.text(), "INITSEG");
     assert.deepEqual(order, ["init", "s1"]);
@@ -95,7 +95,7 @@ test("HLS opus maps to .ogg / audio/ogg without requiring MAP", async () => {
   try {
     const r = await worker.fetch(dlReq(1), env);
     assert.equal(r.status, 200);
-    assert.equal(r.headers.get("Content-Type"), "audio/ogg");
+    assert.equal(r.headers.get("Content-Type"), "application/octet-stream");
     assert.ok(/\.ogg/.test(r.headers.get("Content-Disposition") || ""));
     assert.equal(await r.text(), "OPUS");
   } finally { restore(); }
@@ -222,7 +222,7 @@ test("regression: strictAudio accepts audio/mpeg (was i is not defined)", async 
   try {
     const r = await worker.fetch(dlReq(1), env);
     assert.equal(r.status, 200, "must not throw i is not defined");
-    assert.equal(r.headers.get("Content-Type"), "audio/mpeg");
+    assert.equal(r.headers.get("Content-Type"), "application/octet-stream");
   } finally { restore(); }
 });
 
