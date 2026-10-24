@@ -1099,8 +1099,17 @@ export default {
           applyCors(h);
           return new Response(request.method === "HEAD" ? null : html, { headers: h });
         }
-        return json({ name: "SoundCloud Music API", version: "2.0.0", docs: "/openapi.json",
-          endpoints: ["/api/v1/search", "/api/v1/track", "/api/v1/stream", "/api/v1/download", "/api/v1/cover", "/health", "/openapi.json"] }, {}, reqId);
+        // JSON clients get the exact original shape (same as the reference worker).
+        return new Response(JSON.stringify({
+          message: 'SoundCloud API Worker',
+          endpoints: {
+            '/search?q={query}': 'Search for music',
+            '/music?id={id}': 'Get music by ID',
+            '/download-url?id={id}': 'Get download URL for music by ID',
+            '/direct-download?id={id}': 'Redirect to direct download URL',
+            '/music-by-url?url={url}': 'Get music by SoundCloud URL'
+          }
+        }), { headers: { ...cors, 'Content-Type': 'application/json' } });
       }
 
       if (path === "/health" && request.method === "GET") {

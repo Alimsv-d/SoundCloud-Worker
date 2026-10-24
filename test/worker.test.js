@@ -68,8 +68,9 @@ test("GET / returns HTML by default; JSON only for explicit application/json", a
   r = await worker.fetch(req("/", { Accept: "application/json" }), env);
   assert.ok(r.headers.get("Content-Type").includes("application/json"));
   const j = await r.json();
-  assert.ok(j.endpoints.includes("/api/v1/search"));
-  assert.ok(j.request_id);
+  // Exact original shape.
+  assert.equal(j.message, "SoundCloud API Worker");
+  assert.ok(j.endpoints["/search?q={query}"]);
 });
 
 test("HEAD / empty body", async () => {
