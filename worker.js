@@ -998,8 +998,10 @@ var chk=await (await fetch('/api/v1/download?id='+encodeURIComponent(sid)+'&chec
 if(chk&&chk.ok===false&&chk.error){alert(dlMsg()+' ('+(chk.error.code||'')+')');return}
 if(chk&&chk.mode==='browser'){startDownload(id,el,chk);return}
 if(chk&&chk.mode==='direct'){
-var a=document.createElement('a');a.href='/api/v1/download?id='+encodeURIComponent(sid);
-a.download=tname(id)+'.'+(chk.ext||'mp3');document.body.appendChild(a);a.click();a.remove();return;
+// Navigate to the attachment URL directly — server sends octet-stream +
+// Content-Disposition: attachment, so mobile starts a real download instead
+// of opening a player. Keeps working even after async check (no gesture needed).
+location.href='/api/v1/download?id='+encodeURIComponent(sid);return;
 }
 throw new Error(chk.mode||'bad response');
 }catch(err){alert(dlMsg()+(err&&err.message?' ('+err.message+')':''))}
@@ -1028,9 +1030,9 @@ async function w(){while(idx<urls.length){var i=idx++;var r=await fetch(urls[i])
 var ws=[];for(var i=0;i<CONC;i++)ws.push(w());await Promise.all(ws);
 blob=new Blob(parts);
 }else{throw new Error(chk.mode||'err')}
-var a=document.createElement('a');a.href=URL.createObjectURL(blob);
-a.download=tname(id)+'.'+ext;
-document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(a.href)},4000);
+// Save a Blob. On mobile prefer the share sheet (Save to Files/Downloads) —
+// a plain a[download] blob URL often opens an in-browser player instead.
+await saveBlob(blob,tname(id)+'.'+ext);
 if(btn)btn.textContent=orig;
 }catch(err){show('DL: '+err.message);if(btn)btn.textContent=orig;
 alert(dlMsg()+(err&&err.message?(' ('+err.message+')'):''))}
@@ -1057,13 +1059,23 @@ for(var b=0;b<bufs.length;b++){var l=bufs[b].getChannelData(0),r2=ch>1?bufs[b].g
 out.push(enc.encodeBuffer(f32i(l),f32i(r2)))}
 out.push(enc.flush());
 var blob=new Blob(out,{type:'audio/mpeg'});
-var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=tname(id)+'.mp3';
-document.body.appendChild(a);a.click();a.remove();
+await saveBlob(blob,tname(id)+'.mp3');
 if(btn)btn.textContent=orig;
 }catch(err){show('MP3: '+err.message);if(btn)btn.textContent=orig;alert(dlMsg())}
 }
 function f32i(f){var o=new Int16Array(f.length);for(var i=0;i<f.length;i++)o[i]=Math.max(-32768,Math.min(32767,Math.round(f[i]*32768)));return o}
 function loadScript(src){return new Promise(function(res,rej){var s=document.createElement('script');s.src=src;s.addEventListener('load',res);s.addEventListener('error',rej);document.head.appendChild(s)})}
+// Save a blob as a real file. On mobile browsers the Web Share API gives a
+// "Save to Files / Downloads" sheet; fall back to a[download] elsewhere.
+async function saveBlob(blob,filename){
+var f=null;
+try{f=new File([blob],filename,{type:blob.type||'application/octet-stream'})}catch(e){}
+if(f&&navigator.canShare&&navigator.canShare({files:[f]})&&navigator.share){
+try{await navigator.share({files:[f]});return}catch(e){/* user cancelled or unsupported */}
+}
+var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;
+document.body.appendChild(a);a.click();a.remove();setTimeout(function(){URL.revokeObjectURL(a.href)},4000);
+}
 })();
 </script>
 </body>
@@ -1259,7 +1271,7 @@ export default {
         if (url.searchParams.get("deep") === "1") {
           try { await sc.init(); ok = true; } catch { ok = false; }
         }
-        return json({ status: "ok", version: "2.1.2-20261024-0210", kv: !!kv,
+        return json({ status: "ok", version: "2.1.3-20261024-0230", kv: !!kv,
           soundcloud: { configured: true, healthy: ok } }, {}, reqId);
       }
       if (path === "/openapi.json" && request.method === "GET")
