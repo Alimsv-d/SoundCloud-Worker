@@ -19,6 +19,8 @@ UPSTREAM_TIMEOUT_MS = "12000"
 RATE_LIMIT_SEARCH = "40"
 RATE_LIMIT_MEDIA = "90"
 RATE_LIMIT_WINDOW_SEC = "60"
+MAX_HLS_SEGMENTS = "1500"
+ALLOWED_ORIGINS = "*"
 
 # Optional secrets — set via `wrangler secret put` or Dashboard → Secrets:
 #   SOUNDCLOUD_CLIENT_ID (override auto-scrape), API_KEYS (gate /api/v1)

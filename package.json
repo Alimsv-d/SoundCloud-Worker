@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Music search & download on Cloudflare Workers — single-file worker.js (Deezer, iTunes, Openverse, Internet Archive, Jamendo, SoundCloud)",
+  "description": "SoundCloud music search, preview & download on Cloudflare Workers — single-file worker.js",
   "scripts": {
     "check": "node --check worker.js",
     "test": "node --test 'test/*.test.js'",
