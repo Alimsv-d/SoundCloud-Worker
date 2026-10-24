@@ -302,10 +302,18 @@ class SoundCloud {
         if (loc) u = loc;
       } catch { return null; }
     }
-    if (!/^https?:\/\/(www\.|m\.)?soundcloud\.com\/[\w-]+\/[\w-]+\/?/.test(u)) return null;
-    const html = await (await fetch(u)).text();
-    const m = [...html.matchAll(/soundcloud:\/\/sounds:(\d+)/g)];
-    return m.length ? await this.getMusic(m[0][1]) : null;
+    if (!/^https?:\/\/(www\.|m\.)?soundcloud\.com\/[\w-]+/.test(u)) return null;
+    // Primary: official resolve endpoint (reliable — page-scrape regex broke).
+    try {
+      const d = await this._get(`${SC_API}resolve?url=${encodeURIComponent(u)}`);
+      if (d && d.id && d.kind === "track") return this._norm(d, true);
+    } catch {}
+    // Fallback: scrape the permalink page for a track id.
+    try {
+      const html = await (await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" } })).text();
+      const m = [...html.matchAll(/soundcloud:\/\/sounds:(\d+)/g)];
+      return m.length ? await this.getMusic(m[0][1]) : null;
+    } catch { return null; }
   }
 
   /* ----- original-API methods (kept for parity + reuse in bots) ----- */
@@ -342,8 +350,24 @@ class SoundCloud {
 
   async getMusicWithUrl(u) {
     if (!this.isValidSoundCloudUrl(u)) return false;
+    // Resolve short links, then use api resolve (page-scrape regex no longer works).
+    if (/^https?:\/\/on\.soundcloud\.com\//.test(u)) {
+      try {
+        const r = await fetch(u, { redirect: "manual", headers: { "User-Agent": "Mozilla/5.0" } });
+        const loc = r.headers.get("Location"); if (loc) u = loc;
+      } catch {}
+    }
     try {
-      const html = await (await fetch(u)).text();
+      const d = await this._get(`${SC_API}resolve?url=${encodeURIComponent(u)}`);
+      if (d && d.id && d.kind === "track") {
+        return { status: true, id: String(d.id),
+          picture: (d.artwork_url || d.user.avatar_url).replace("large", "original"),
+          title: d.title, release: d.created_at, genre: d.genre,
+          duration: d.duration, soundcloudurl: d.permalink_url };
+      }
+    } catch {}
+    try {
+      const html = await (await fetch(u, { headers: { "User-Agent": "Mozilla/5.0" } })).text();
       const m = [...html.matchAll(/soundcloud:\/\/sounds:(.*?)"/gm)];
       return (m.length && m[0][1]) ? await this.getMusicOriginal(m[0][1]) : false;
     } catch { return false; }
@@ -1228,7 +1252,7 @@ export default {
         if (url.searchParams.get("deep") === "1") {
           try { await sc.init(); ok = true; } catch { ok = false; }
         }
-        return json({ status: "ok", version: "2.1.0-20261024-0130", kv: !!kv,
+        return json({ status: "ok", version: "2.1.1-20261024-0145", kv: !!kv,
           soundcloud: { configured: true, healthy: ok } }, {}, reqId);
       }
       if (path === "/openapi.json" && request.method === "GET")
