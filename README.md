@@ -53,6 +53,8 @@ Workflow `deploy.yml` با `workflow_dispatch` اجرا می‌شود. دو سک
 | `RATE_LIMIT_MEDIA` | `90` | سقف مدیا در پنجره |
 | `RATE_LIMIT_WINDOW_SEC` | `60` | طول پنجره‌ی rate-limit (ثانیه) |
 | `MAX_HLS_SEGMENTS` | `1500` | سقف تعداد سگمنت HLS |
+| `SUBREQUEST_LIMIT` | `45` | سقف subrequest در هر درخواست (پلن رایگان ۵۰ است؛ این مقدار حاشیه امن می‌گذارد) |
+| `LONG_TRACK_MODE` | `browser` | رفتار برای ترک طولانی: `browser` / `error` / `direct` |
 | `ALLOWED_ORIGINS` | `*` | مقدار `Access-Control-Allow-Origin` |
 | `API_KEYS` | — | (سکرت) فعال‌سازی احراز `x-api-key` روی `/api/v1/*` |
 | `SOUNDCLOUD_CLIENT_ID` | — | (سکرت) override برای client_id خودکار |
@@ -77,8 +79,18 @@ Workflow `deploy.yml` با `workflow_dispatch` اجرا می‌شود. دو سک
 - `GET /direct-download?id=…` → ریدایرکت 302
 - `GET /music-by-url?url=…`
 
+### محدودیت پلن رایگان (مهم)
+Cloudflare Workers به‌ازای هر درخواست یک سقف **subrequest** دارد: **پلن رایگان = ۵۰** و **Workers Paid = ۱۰٬۰۰۰** ([مستندات رسمی](https://developers.cloudflare.com/workers/platform/limits/#subrequests)).
+- ترک‌های **progressive** و **HLS کوتاه** همیشه مستقیم و سروری دانلود می‌شوند.
+- ترک **HLS بلند** که به بیش از `SUBREQUEST_LIMIT` سگمنت نیاز دارد، روی پلن رایگان نمی‌تواند در یک درخواست سروری ساخته شود. با `LONG_TRACK_MODE`:
+  - `browser` (پیش‌فرض): UI سگمنت‌ها را از `/api/v1/hls-seg` می‌گیرد و در مرورگر به فایل می‌چسباند — روی هر پلنی کار می‌کند.
+  - `error`: پاسخ `413 TRACK_TOO_LONG`.
+  - `direct`: تلاش سروری (فقط روی Workers Paid امن است).
+- روی **Workers Paid** مقدار `SUBREQUEST_LIMIT` را بالا ببرید (مثلاً `5000`) و `LONG_TRACK_MODE=direct` بگذارید تا همه‌ی ترک‌ها سروری دانلود شوند.
+- بیشینه‌ی مدت تقریبی دانلود مستقیم روی پلن رایگان ≈ `SUBREQUEST_LIMIT` × مدت هر سگمنت (معمولاً ~۱۰ ثانیه) ≈ **چند دقیقه**.
+
 ### کدهای خطا
-`BAD_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `RATE_LIMITED` `UPSTREAM_ERROR` `UPSTREAM_TIMEOUT` `PAYLOAD_TOO_LARGE` `NOT_DOWNLOADABLE` `INTERNAL_ERROR`
+`BAD_REQUEST` `NOT_FOUND` `UNAUTHORIZED` `RATE_LIMITED` `UPSTREAM_ERROR` `UPSTREAM_TIMEOUT` `PAYLOAD_TOO_LARGE` `NOT_DOWNLOADABLE` `TRACK_TOO_LONG` `INTERNAL_ERROR`
 
 ### مثال‌ها
 ```bash
@@ -107,6 +119,7 @@ const { results } = await r.json();
 - Search, preview & download SoundCloud tracks
 - `client_id` is **auto-scraped** — no secret required
 - Direct-file downloads plus **automatic HLS→audio reassembly** (mp3/ogg/m4a)
+- Long-HLS tracks: **free plan = 50 subrequests/request** → browser-segmented download; **Workers Paid = 10,000** → set `SUBREQUEST_LIMIT` + `LONG_TRACK_MODE=direct`
 - Persian/English web UI with light/dark theme
 - Five legacy endpoints with the exact original JSON shape, plus `/api/v1/*`
 - Works with **no KV** (in-memory cache & rate-limit); uses KV when bound

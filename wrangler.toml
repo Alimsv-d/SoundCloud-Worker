@@ -21,6 +21,14 @@ RATE_LIMIT_MEDIA = "90"
 RATE_LIMIT_WINDOW_SEC = "60"
 MAX_HLS_SEGMENTS = "1500"
 ALLOWED_ORIGINS = "*"
+# Cloudflare subrequest budget. Official limits: Workers Free = 50/req, Paid = 10,000/req.
+# Default 45 leaves headroom for client_id scrape + track lookup + redirects.
+SUBREQUEST_LIMIT = "45"
+# What to do when a track needs more subrequests than the budget:
+#   "browser" = UI downloads via /api/v1/hls-seg (default, works on every plan)
+#   "error"   = return 413 TRACK_TOO_LONG
+#   "direct"  = attempt server-side anyway (only safe on Workers Paid)
+LONG_TRACK_MODE = "browser"
 
 # Optional secrets — set via `wrangler secret put` or Dashboard → Secrets:
 #   SOUNDCLOUD_CLIENT_ID (override auto-scrape), API_KEYS (gate /api/v1)

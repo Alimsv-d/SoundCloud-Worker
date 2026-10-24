@@ -144,6 +144,88 @@ test("?check=1 returns mode+ext without downloading bytes", async () => {
   } finally { restore(); }
 });
 
+test("short HLS downloads directly & fully (server-side)", async () => {
+  const manifest = "#EXTM3U\n#EXTINF:6\ns1.mp3\n#EXTINF:6\ns2.mp3\n#EXT-X-ENDLIST";
+  const m = TRACK({ media: { transcodings: [{ format: { protocol: "hls", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc/h" }] } });
+  const restore = fakeFetch([...baseH,
+    [u => /tracks\/1(\?|$)/.test(u), () => Response.json(m)],
+    [u => u.startsWith("https://api-v2.soundcloud.com/tc/h"), () => Response.json({ url: "https://cf-hls.sndcdn.com/pl.m3u8" })],
+    [u => u === "https://cf-hls.sndcdn.com/pl.m3u8", () => new Response(manifest)],
+    [u => /s[12]\.mp3$/.test(u), () => new Response("MP3", { headers: { "Content-Type": "audio/mpeg" } })],
+  ]);
+  try {
+    const r = await worker.fetch(dlReq(1), env);
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), "MP3MP3");
+  } finally { restore(); }
+});
+
+test("long track + LONG_TRACK_MODE=error -> 413 TRACK_TOO_LONG", async () => {
+  const e2 = { MAX_DOWNLOAD_MB: "100", SUBREQUEST_LIMIT: "5", LONG_TRACK_MODE: "error" };
+  const segs = Array.from({ length: 20 }, (_, i) => `#EXTINF:6\ns${i}.mp3`).join("\n");
+  const m = TRACK({ media: { transcodings: [{ format: { protocol: "hls", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc/h" }] } });
+  const restore = fakeFetch([...baseH,
+    [u => /tracks\/1(\?|$)/.test(u), () => Response.json(m)],
+    [u => u.startsWith("https://api-v2.soundcloud.com/tc/h"), () => Response.json({ url: "https://cf-hls.sndcdn.com/pl.m3u8" })],
+    [u => u === "https://cf-hls.sndcdn.com/pl.m3u8", () => new Response("#EXTM3U\n" + segs + "\n#EXT-X-ENDLIST")],
+  ]);
+  try {
+    const r = await worker.fetch(dlReq(1), e2);
+    assert.equal(r.status, 413);
+    const j = await r.json();
+    assert.equal(j.error.code, "TRACK_TOO_LONG");
+    assert.ok(j.error.max_direct_seconds > 0);
+  } finally { restore(); }
+});
+
+test("long track + LONG_TRACK_MODE=browser -> check=1 mode:browser", async () => {
+  const e2 = { MAX_DOWNLOAD_MB: "100", SUBREQUEST_LIMIT: "5", LONG_TRACK_MODE: "browser" };
+  const segs = Array.from({ length: 20 }, (_, i) => `#EXTINF:6\ns${i}.mp3`).join("\n");
+  const m = TRACK({ media: { transcodings: [{ format: { protocol: "hls", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc/h" }] } });
+  const restore = fakeFetch([...baseH,
+    [u => /tracks\/1(\?|$)/.test(u), () => Response.json(m)],
+    [u => u.startsWith("https://api-v2.soundcloud.com/tc/h"), () => Response.json({ url: "https://cf-hls.sndcdn.com/pl.m3u8" })],
+    [u => u === "https://cf-hls.sndcdn.com/pl.m3u8", () => new Response("#EXTM3U\n" + segs + "\n#EXT-X-ENDLIST")],
+  ]);
+  try {
+    const r = await worker.fetch(req("/api/v1/download?id=1&check=1"), e2);
+    const j = await r.json();
+    assert.equal(j.mode, "browser");
+    assert.equal(j.segments, 20);
+  } finally { restore(); }
+});
+
+test("mid-stream segment failure errors the stream (no silent short file)", async () => {
+  const manifest = "#EXTM3U\n#EXTINF:6\nok1.mp3\n#EXTINF:6\nBAD.mp3\n#EXTINF:6\nok2.mp3\n#EXT-X-ENDLIST";
+  const m = TRACK({ media: { transcodings: [{ format: { protocol: "hls", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc/h" }] } });
+  const restore = fakeFetch([...baseH,
+    [u => /tracks\/1(\?|$)/.test(u), () => Response.json(m)],
+    [u => u.startsWith("https://api-v2.soundcloud.com/tc/h"), () => Response.json({ url: "https://cf-hls.sndcdn.com/pl.m3u8" })],
+    [u => u === "https://cf-hls.sndcdn.com/pl.m3u8", () => new Response(manifest)],
+    [u => /ok[12]\.mp3$/.test(u), () => new Response("OK")],
+    [u => /BAD\.mp3$/.test(u), () => new Response("err", { status: 500 })],
+  ]);
+  try {
+    const r = await worker.fetch(dlReq(1), env);
+    assert.equal(r.status, 200);
+    await assert.rejects(() => r.text(), "stream should error mid-way");
+  } finally { restore(); }
+});
+
+test("regression: strictAudio accepts audio/mpeg (was i is not defined)", async () => {
+  const m = TRACK({ media: { transcodings: [{ format: { protocol: "progressive", mime_type: "audio/mpeg" }, url: "https://api-v2.soundcloud.com/tc/p" }] } });
+  const restore = fakeFetch([...baseH,
+    [u => /tracks\/1(\?|$)/.test(u), () => Response.json(m)],
+    [u => u.startsWith("https://api-v2.soundcloud.com/tc/p"), () => Response.json({ url: "https://cf-media.sndcdn.com/x.mp3" })],
+    [u => u === "https://cf-media.sndcdn.com/x.mp3", () => new Response("MP3DATA", { headers: { "Content-Type": "audio/mpeg" } })],
+  ]);
+  try {
+    const r = await worker.fetch(dlReq(1), env);
+    assert.equal(r.status, 200, "must not throw i is not defined");
+    assert.equal(r.headers.get("Content-Type"), "audio/mpeg");
+  } finally { restore(); }
+});
+
 test("hls-seg proxy blocks non-SoundCloud hosts (SSRF)", async () => {
   const r = await worker.fetch(req("/api/v1/hls-seg?u=" + encodeURIComponent("https://evil.com/s")), env);
   assert.equal(r.status, 400);
