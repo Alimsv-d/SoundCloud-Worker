@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import worker from "../worker.js";
 
 const env = { MAX_DOWNLOAD_MB: "100" };
-const req = (p, h = {}) => new Request(`https://w.test${p}`, { headers: h });
+const req = (p, h = {}, method = "GET") => new Request(`https://w.test${p}`, { headers: h, method });
 
 const TRACK = (over = {}) => ({
   id: 1, kind: "track", streamable: true, title: "Song",
@@ -154,6 +154,28 @@ test("CORS present on /health, /openapi.json, api and streams", async () => {
     const r = await worker.fetch(req(p), env);
     assert.equal(r.headers.get("Access-Control-Allow-Origin"), "*", p);
   }
+});
+
+test("/?format=json returns the original JSON contract", async () => {
+  const r = await worker.fetch(req("/?format=json", { Accept: "text/html" }), env);
+  const j = await r.json();
+  assert.equal(j.message, "SoundCloud API Worker");
+  assert.ok(j.endpoints["/search?q={query}"]);
+});
+
+test("rate limit (in-memory, no KV) trips after cap", async () => {
+  const e = { MAX_DOWNLOAD_MB: "100", RATE_LIMIT_SEARCH: "2", RATE_LIMIT_WINDOW_SEC: "60" };
+  let limited = 0;
+  for (let i = 0; i < 4; i++) {
+    const r = await worker.fetch(req("/?q=x" + i, { Accept: "text/html" }), e);
+    if (r.status === 429) limited++;
+  }
+  assert.ok(limited >= 1, "expected at least one 429");
+});
+
+test("OPTIONS preflight returns CORS headers", async () => {
+  const r = await worker.fetch(req("/api/v1/search", {}, "OPTIONS"), env);
+  assert.ok(r.headers.get("Access-Control-Allow-Origin"));
 });
 
 test("no github string in /, /?lang=en, /openapi.json, /health, 404", async () => {

@@ -1072,8 +1072,9 @@ export default {
       /* ------------------------------ web page ---------------------------- */
       if ((path === "/" || path === "") && (request.method === "GET" || request.method === "HEAD")) {
         const acc = request.headers.get("Accept") || "";
-        // Serve HTML unless the client explicitly prefers JSON (q-value aware).
-        const wantsJson = /application\/json/.test(acc) && !/text\/html/.test(acc);
+        // Serve HTML unless the client explicitly prefers JSON (Accept header or ?format=json).
+        const wantsJson = url.searchParams.get("format") === "json" ||
+          (/application\/json/.test(acc) && !/text\/html/.test(acc));
         if (!wantsJson) {
           const lang = url.searchParams.get("lang") === "en" ? "en" : "fa";
           const nonce = crypto.randomUUID().replace(/-/g, "");
