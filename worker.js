@@ -107,14 +107,15 @@ class SoundCloud {
   }
 
   async init() {
-    if (this.clientId) return this.clientId;
-    if (SC_CID_CACHE && Date.now() < SC_CID_CACHE_UNTIL) {
-      this.clientId = SC_CID_CACHE;
-      return this.clientId;
-    }
-    if (this.kv) { try { const c = await this.kv.get("sc:cid"); if (c) {
-      this.clientId = c; SC_CID_CACHE = c; SC_CID_CACHE_UNTIL = Date.now() + 45 * 60 * 1000; return c;
-    } } catch {} }
+    // Keep the original worker contract: validate the current client_id via
+    // api-auth, then scrape a fresh one when invalid. Modern API requests still
+    // refresh automatically on later 401/403 rotations.
+    try {
+      if (await this.checkClientId()) return this.clientId;
+    } catch {}
+    this.clientId = null;
+    SC_CID_CACHE = null; SC_CID_CACHE_UNTIL = 0;
+    if (this.kv) try { await this.kv.delete("sc:cid"); } catch {}
     return this.setClientId();
   }
 
@@ -154,6 +155,20 @@ class SoundCloud {
       const r = await fetch(`${SC_AUTH}oauth/session?client_id=${await this.getClientId()}`);
       return !!(await r.json()).session;
     } catch { return false; }
+  }
+
+  // Preserve the original worker contract: init validates the scraped
+  // client_id against api-auth before serving requests. Modern /api/v1 routes
+  // keep their refresh-and-retry behaviour when an id rotates later.
+  async requireValidClientId() {
+    await this.getClientId();
+    if (await this.checkClientId()) return true;
+    this.clientId = null;
+    SC_CID_CACHE = null; SC_CID_CACHE_UNTIL = 0;
+    if (this.kv) try { await this.kv.delete("sc:cid"); } catch {}
+    await this.getClientId();
+    if (!(await this.checkClientId())) throw new Error("Invalid SoundCloud client_id");
+    return true;
   }
 
   // Authed request with auto client_id refresh on 401/403 — keeps the service
@@ -1443,7 +1458,7 @@ export default {
 
       /* ---------- legacy endpoints (original API, unchanged shape) ---------- */
       const legacy = async (fn) => {
-        await sc.init();
+        await sc.requireValidClientId();
         return new Response(JSON.stringify(await fn()),
           { headers: { ...cors, 'Content-Type': 'application/json' } });
       };
@@ -1469,8 +1484,9 @@ export default {
       }
       if (path === "/direct-download" && request.method === "GET") {
         const id = need("id"); if (id instanceof Response) return id;
-        await sc.init();
-        const r = await sc.getDownloadUrl(id);
+        let r;
+        try { await sc.requireValidClientId(); r = await sc.getDownloadUrl(id); }
+        catch { r = sc.internalError(); }
         if (!r || !r.status || !r.download_url)
           return new Response(JSON.stringify(r && r.status === false ? r : { status: false, status_det: "INTERNAL_ERROR" }),
             { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });
