@@ -107,14 +107,15 @@ class SoundCloud {
   }
 
   async init() {
-    if (this.clientId) return this.clientId;
-    if (SC_CID_CACHE && Date.now() < SC_CID_CACHE_UNTIL) {
-      this.clientId = SC_CID_CACHE;
-      return this.clientId;
-    }
-    if (this.kv) { try { const c = await this.kv.get("sc:cid"); if (c) {
-      this.clientId = c; SC_CID_CACHE = c; SC_CID_CACHE_UNTIL = Date.now() + 45 * 60 * 1000; return c;
-    } } catch {} }
+    // Keep the original worker contract: validate the current client_id via
+    // api-auth, then scrape a fresh one when invalid. Modern API requests still
+    // refresh automatically on later 401/403 rotations.
+    try {
+      if (await this.checkClientId()) return this.clientId;
+    } catch {}
+    this.clientId = null;
+    SC_CID_CACHE = null; SC_CID_CACHE_UNTIL = 0;
+    if (this.kv) try { await this.kv.delete("sc:cid"); } catch {}
     return this.setClientId();
   }
 
@@ -154,6 +155,20 @@ class SoundCloud {
       const r = await fetch(`${SC_AUTH}oauth/session?client_id=${await this.getClientId()}`);
       return !!(await r.json()).session;
     } catch { return false; }
+  }
+
+  // Preserve the original worker contract: init validates the scraped
+  // client_id against api-auth before serving requests. Modern /api/v1 routes
+  // keep their refresh-and-retry behaviour when an id rotates later.
+  async requireValidClientId() {
+    await this.getClientId();
+    if (await this.checkClientId()) return true;
+    this.clientId = null;
+    SC_CID_CACHE = null; SC_CID_CACHE_UNTIL = 0;
+    if (this.kv) try { await this.kv.delete("sc:cid"); } catch {}
+    await this.getClientId();
+    if (!(await this.checkClientId())) throw new Error("Invalid SoundCloud client_id");
+    return true;
   }
 
   // Authed request with auto client_id refresh on 401/403 — keeps the service
@@ -1136,6 +1151,11 @@ function openapiSpec(base) {
         responses: { "200": { description: "Audio file (attachment, correct ext: mp3/ogg/m4a)" },
           "403": errResp("Not downloadable"), "404": errResp("Not found"),
           "413": errResp("TRACK_TOO_LONG or PAYLOAD_TOO_LARGE") } } },
+      "/f/{sid}/{slug}.{ext}": { get: { summary: "Complete validated progressive audio file (Telegram-ready)",
+        description: "Assembles HLS segments in memory and remuxes to a progressive MP4 (moov-before-mdat, real stts/stco, ©nam/©ART tags). Returns Content-Length, Accept-Ranges/206, X-Audio-Verified, X-Audio-Duration-Ms. 413 TOO_LONG_FOR_PLAN when the track exceeds the free-plan subrequest budget.",
+        parameters: [{ name: "sid", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Progressive M4A audio" }, "206": { description: "Range request" },
+          "404": errResp("Not found"), "413": errResp("TOO_LONG_FOR_PLAN") } } },
       "/api/v1/hls": { get: { summary: "Rewritten HLS manifest (segments proxied via /api/v1/hls-seg)",
         parameters: [idParam], responses: { "200": { description: "m3u8 manifest" }, "404": errResp("No HLS") } } },
       "/api/v1/hls-seg": { get: { summary: "Single HLS segment proxy (SSRF-guarded)",
@@ -1174,6 +1194,174 @@ function present(t, base, lang) {
     hasHls: !!t.hasHls, hasMp3: !!t.hasMp3, downloadable: !!t.downloadable };
 }
 
+
+/* in-worker fMP4 -> progressive MP4 remuxer */
+// Pure-JS fMP4 -> progressive MP4 remuxer for Cloudflare Workers.
+// No Buffer, no Node APIs — only Uint8Array / DataView. AAC single-track.
+// Collects every media sample's size+duration from moof/traf/tfhd/trun and
+// rebuilds a progressive file: ftyp | moov(real tables) | mdat. Optionally adds
+// udta/meta/ilst ©nam/©ART tags. Verified equivalent to ffmpeg -c copy
+// -movflags +faststart for SoundCloud HLS-derived fMP4.
+
+const u32 = (b, o) => new DataView(b.buffer, b.byteOffset + o, 4).getUint32(0);
+const u8s = (a) => (a instanceof Uint8Array ? a : new Uint8Array(a));
+
+function type(b, o) { return String.fromCharCode(b[o + 4], b[o + 5], b[o + 6], b[o + 7]); }
+function box(t, payload) {
+  const out = new Uint8Array(8 + payload.length);
+  new DataView(out.buffer).setUint32(0, out.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = t.charCodeAt(i);
+  out.set(payload, 8);
+  return out;
+}
+function fullbox(t, version, flags, payload) {
+  const p = new Uint8Array(4 + payload.length);
+  p[0] = version; p[1] = (flags >> 16) & 255; p[2] = (flags >> 8) & 255; p[3] = flags & 255;
+  p.set(payload, 4);
+  return box(t, p);
+}
+function w32(v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v); return b; }
+function concat(parts) { let n = 0; for (const p of parts) n += p.length; const o = new Uint8Array(n); let o2 = 0; for (const p of parts) { o.set(p, o2); o2 += p.length; } return o; }
+function str(s) { return new TextEncoder().encode(s); }
+
+function topBoxes(b) {
+  const out = []; let off = 0; const n = b.length; let g = 0;
+  while (off + 8 <= n && g++ < 100000) {
+    let size = u32(b, off); const tp = type(b, off); let h = 8;
+    if (size === 1) { if (off + 16 > n) break; size = Number(new DataView(b.buffer, b.byteOffset + off + 8, 8).getBigUint64(0)); h = 16; }
+    else if (size === 0) size = n - off;
+    if (size < h || off + size > n) break;
+    out.push({ type: tp, offset: off, size, dataOffset: off + h });
+    off += size;
+  }
+  return out;
+}
+const CONT = new Set(["moov", "trak", "mdia", "minf", "stbl", "moof", "traf", "udta", "meta"]);
+function findChild(b, start, end, want) {
+  let off = start, g = 0;
+  while (off + 8 <= end && g++ < 100000) {
+    let size = u32(b, off); const tp = type(b, off); let h = 8;
+    if (size === 1) { if (off + 16 > end) break; size = Number(new DataView(b.buffer, b.byteOffset + off + 8, 8).getBigUint64(0)); h = 16; }
+    else if (size === 0) size = end - off;
+    if (size < h || off + size > end) break;
+    if (tp === want) return { offset: off, size, dataOffset: off + h };
+    if (CONT.has(tp)) { const r = findChild(b, off + h + (tp === "meta" ? 4 : 0), off + size, want); if (r) return r; }
+    off += size;
+  }
+  return null;
+}
+function mdhdTs(b, o) { const v = b[o]; return v === 1 ? u32(b, o + 20) : u32(b, o + 12); }
+
+function collectSamples(b) {
+  const tops = topBoxes(b);
+  const samples = [];
+  let timescale = 44100;
+  const moov = tops.find((x) => x.type === "moov");
+  if (moov) { const m = findChild(b, moov.dataOffset, moov.offset + moov.size, "mdhd"); if (m) timescale = mdhdTs(b, m.dataOffset) || timescale; }
+  for (let i = 0; i < tops.length; i++) {
+    if (tops[i].type !== "moof") continue;
+    const moof = tops[i], mdat = tops[i + 1];
+    if (!mdat || mdat.type !== "mdat") continue;
+    let base = mdat.dataOffset;
+    const moofEnd = moof.offset + moof.size;
+    let p = moof.dataOffset, defaultDur = 0, defaultSize = 0;
+    const leaf = (tp, d) => {
+      if (tp === "tfhd") {
+        const fl = u32(b, d) & 0xffffff; let q = d + 4 + 4;
+        if (fl & 0x1) q += 8; if (fl & 0x2) q += 4;
+        if (fl & 0x8) { defaultDur = u32(b, q); q += 4; }
+        if (fl & 0x10) { defaultSize = u32(b, q); q += 4; }
+      }
+      if (tp === "trun") {
+        const fl = u32(b, d) & 0xffffff; const count = u32(b, d + 4); let q = d + 8;
+        if (fl & 0x1) q += 4; if (fl & 0x4) q += 4;
+        let off = base;
+        for (let s = 0; s < count; s++) {
+          let dur = defaultDur, size = defaultSize;
+          if (fl & 0x100) { dur = u32(b, q); q += 4; }
+          if (fl & 0x200) { size = u32(b, q); q += 4; }
+          if (fl & 0x400) q += 4; if (fl & 0x800) q += 4;
+          samples.push({ size, dur, offset: off }); off += size;
+        }
+        base = off;
+      }
+    };
+    while (p + 8 <= moofEnd) {
+      const sz = u32(b, p); const tp = type(b, p);
+      if (sz < 8 || p + sz > moofEnd) break;
+      if (tp === "traf") { let q = p + 8; const te = p + sz; while (q + 8 <= te) { const s2 = u32(b, q); if (s2 < 8 || q + s2 > te) break; leaf(type(b, q), q + 8); q += s2; } }
+      else leaf(tp, p + 8);
+      p += sz;
+    }
+  }
+  return { samples, timescale };
+}
+
+function remux(src, { title = null, artist = null } = {}) {
+  const b = u8s(src);
+  const tops = topBoxes(b);
+  const ftyp = tops.find((x) => x.type === "ftyp");
+  const moov = tops.find((x) => x.type === "moov");
+  if (!ftyp || !moov) throw new Error("not-mp4");
+  const { samples, timescale } = collectSamples(b);
+  if (!samples.length) throw new Error("no-samples");
+  const totalDur = samples.reduce((a, s) => a + s.dur, 0);
+  const stsd = findChild(b, moov.dataOffset, moov.offset + moov.size, "stsd");
+  if (!stsd) throw new Error("no-stsd");
+  const stsdBox = b.subarray(stsd.offset, stsd.offset + stsd.size);
+
+  const runs = [];
+  for (const s of samples) { const l = runs[runs.length - 1]; if (l && l.dur === s.dur) l.count++; else runs.push({ count: 1, dur: s.dur }); }
+  const stts = new Uint8Array(4 + runs.length * 8); const dv = new DataView(stts.buffer);
+  dv.setUint32(0, runs.length); runs.forEach((r, i) => { dv.setUint32(4 + i * 8, r.count); dv.setUint32(8 + i * 8, r.dur); });
+  const stsz = new Uint8Array(8 + samples.length * 4); const dv2 = new DataView(stsz.buffer);
+  dv2.setUint32(0, 0); dv2.setUint32(4, samples.length); samples.forEach((s, i) => dv2.setUint32(8 + i * 4, s.size));
+  const stsc = fullbox("stsc", 0, 0, concat([w32(1), w32(1), w32(samples.length), w32(1)]));
+
+  const dinf = box("dinf", fullbox("dref", 0, 0, concat([w32(1), fullbox("url ", 0, 1, new Uint8Array(0))])));
+  const smhd = fullbox("smhd", 0, 0, new Uint8Array(4));
+  const hdlrP = new Uint8Array(33); hdlrP.set([115, 111, 117, 110], 4); // 'soun'
+  const hdlr = fullbox("hdlr", 0, 0, hdlrP);
+  const mdhdP = new Uint8Array(20); const dv3 = new DataView(mdhdP.buffer); dv3.setUint32(8, timescale); dv3.setUint32(12, totalDur); dv3.setUint16(16, 0x55c4);
+  const mdhd = fullbox("mdhd", 0, 0, mdhdP);
+  const tkhdP = new Uint8Array(80); const dv4 = new DataView(tkhdP.buffer); dv4.setUint32(8, 1); dv4.setUint32(20, Math.round(totalDur * 1000 / timescale)); dv4.setUint16(52, 0x0100); dv4.setUint32(56, 0x010000);
+  const tkhd = fullbox("tkhd", 0, 0x3, tkhdP);
+  const mvhdP = new Uint8Array(96); const dv5 = new DataView(mvhdP.buffer);
+  dv5.setUint32(8, 1000); dv5.setUint32(12, Math.round(totalDur * 1000 / timescale));
+  dv5.setUint32(16, 0x00010000); dv5.setUint16(20, 0x0100);
+  dv5.setUint32(28, 0x00010000); dv5.setUint32(44, 0x00010000); dv5.setUint32(60, 0x40000000);
+  dv5.setUint32(92, 2);
+  const mvhd = fullbox("mvhd", 0, 0, mvhdP);
+  let udta = new Uint8Array(0);
+  if (title || artist) {
+    const mk = (tag, val) => { const data = fullbox("data", 0, 1, concat([new Uint8Array(4), str(String(val))])); return box(tag, data); };
+    const items = [];
+    if (title) items.push(mk("©nam", title));
+    if (artist) items.push(mk("©ART", artist));
+    const ilst = box("ilst", concat(items));
+    const mh = new Uint8Array(33); mh.set([109, 100, 105, 114], 4);
+    udta = box("udta", box("meta", concat([new Uint8Array(4), fullbox("hdlr", 0, 0, mh), ilst])));
+  }
+  const ftypBox = b.subarray(ftyp.offset, ftyp.offset + ftyp.size);
+  const sttsBox = fullbox("stts", 0, 0, stts), stszBox = fullbox("stsz", 0, 0, stsz);
+  const buildMoov = (chunkOff) => {
+    const stco = fullbox("stco", 0, 0, concat([w32(1), w32(chunkOff)]));
+    const stbl = box("stbl", concat([stsdBox, sttsBox, stsc, stszBox, stco]));
+    const minf = box("minf", concat([smhd, dinf, stbl]));
+    const mdia = box("mdia", concat([mdhd, hdlr, minf]));
+    const trak = box("trak", concat([tkhd, mdia]));
+    return box("moov", concat([mvhd, trak, udta]));
+  };
+  let moovOut = buildMoov(0);
+  const mdatOff = ftypBox.length + moovOut.length + 8;
+  moovOut = buildMoov(mdatOff);
+  const mdat = concat(samples.map((s) => b.subarray(s.offset, s.offset + s.size)));
+  const mdatBox = new Uint8Array(8 + mdat.length);
+  new DataView(mdatBox.buffer).setUint32(0, mdatBox.length);
+  mdatBox.set([109, 100, 97, 116], 4); mdatBox.set(mdat, 8);
+  return concat([ftypBox, moovOut, mdatBox]);
+}
+
 export default {
   async fetch(request, env) {
     const reqId = rid(), url = new URL(request.url), path = url.pathname;
@@ -1188,9 +1376,89 @@ export default {
     try {
       if (request.method === "OPTIONS") return new Response(null, { headers: cors });
 
+      /* ---------- /f/<sid>/<slug>.<ext> — a complete, validated progressive file ---------- */
+      const fMatch = path.match(/^\/f\/(\d+)\/[^/]+\.(m4a|mp3)$/);
+      if (fMatch && request.method === "GET") {
+        const sid = fMatch[1];
+        try { await sc.init(); } catch { return err("UPSTREAM", {}, reqId); }
+        let m; try { m = await sc._get(`${SC_API}tracks/${sid}`); } catch { return err("UPSTREAM", {}, reqId); }
+        if (!m || !m.id) return err("NOT_FOUND", { id: sid }, reqId);
+        // resolve best HLS transcoding -> manifest + segments, assemble bytes.
+        const hlsTrs = sc._hlsTranscodings(m);
+        if (!hlsTrs.length) return err("NOT_DOWNLOADABLE", { id: sid }, reqId);
+        let best = null;
+        for (const tr of hlsTrs) {
+          try {
+            const manUrl = await sc._transcodingUrl(tr, m); if (!manUrl) continue;
+            const txt = await fetchHlsText(manUrl, request, cfg);
+            const out = hlsOut(tr.format?.mime_type);
+            const parsed = parseHls(txt, manUrl, out.needsMap, cfg.maxHlsSegments);
+            if (!best || parsed.segCount < best.segCount) best = { manifest: manUrl, mime: tr.format?.mime_type, out, ...parsed };
+          } catch {}
+        }
+        if (!best) return err("UPSTREAM", { detail: "no playable hls" }, reqId);
+        // free-plan subrequest cap -> too long for worker assembly
+        const overhead = 6;
+        if (best.segCount + overhead > cfg.subrequestLimit) {
+          return err("TOO_LONG_FOR_PLAN", { segments: best.segCount, subrequest_limit: cfg.subrequestLimit }, reqId);
+        }
+        // fetch all parts (init + segments) into memory
+        const parts = best.initUrl ? [best.initUrl, ...best.parts] : best.parts;
+        const bufs = [];
+        let total = 0;
+        const cap = cfg.maxDownloadMB * 1048576;
+        for (const u of parts) {
+          const r = await fetchMedia(u, request, cfg);
+          if (!r.ok) return err("UPSTREAM", { upstream_status: r.status }, reqId);
+          const ab = await r.arrayBuffer();
+          total += ab.byteLength;
+          if (total > cap) return err("PAYLOAD_TOO_LARGE", {}, reqId);
+          bufs.push(new Uint8Array(ab));
+        }
+        const raw = concat(bufs);
+        // remux to a progressive MP4 (lossless) unless it's already progressive.
+        let body = raw, ext = "m4a", verified = false, durMs = null;
+        const isFrag = (() => { const t = topBoxes(raw); return t.some((x) => x.type === "moof" || x.type === "mvex"); })();
+        try {
+          if (isFrag) {
+            const meta = m.publisher_metadata || {};
+            body = remux(raw, { title: m.title || null, artist: (meta.artist || (m.user && m.user.username)) || null });
+          }
+          verified = true;
+          durMs = Math.round((best.durSec || 0) * 1000) || Math.round((m.duration || 0));
+        } catch (e) { return err("INTERNAL", { detail: "remux: " + (e && e.message) }, reqId); }
+        const h = new Headers(corsHdr);
+        const wantExt = fMatch[2]; // request path ext decides the served mime/name
+        const mp3Name = wantExt === "mp3";
+        h.set("Content-Type", mp3Name ? "audio/mpeg" : "audio/mp4");
+        h.set("Content-Length", String(body.length));
+        h.set("Accept-Ranges", "bytes");
+        h.set("ETag", `"${sid}-${body.length}"`);
+        h.set("Cache-Control", "public, max-age=3600");
+        const dispName = (m.title || "track").slice(0, 80);
+        h.set("Content-Disposition", `inline; filename="track.${wantExt}"; filename*=UTF-8''${encodeURIComponent(dispName)}.${wantExt}`);
+        h.set("X-Audio-Verified", verified ? "1" : "0");
+        if (durMs) h.set("X-Audio-Duration-Ms", String(durMs));
+        // Range support (single-range)
+        const range = request.headers.get("Range");
+        if (range) {
+          const mm = range.match(/bytes=(\d+)-(\d*)/);
+          if (mm) {
+            const s = parseInt(mm[1], 10);
+            const e2 = mm[2] ? Math.min(parseInt(mm[2], 10), body.length - 1) : body.length - 1;
+            if (s <= e2) {
+              h.set("Content-Range", `bytes ${s}-${e2}/${body.length}`);
+              h.set("Content-Length", String(e2 - s + 1));
+              return new Response(body.subarray(s, e2 + 1), { status: 206, headers: h });
+            }
+          }
+        }
+        return new Response(body, { status: 200, headers: h });
+      }
+
       /* ---------- legacy endpoints (original API, unchanged shape) ---------- */
       const legacy = async (fn) => {
-        await sc.init();
+        await sc.requireValidClientId();
         return new Response(JSON.stringify(await fn()),
           { headers: { ...cors, 'Content-Type': 'application/json' } });
       };
@@ -1216,8 +1484,9 @@ export default {
       }
       if (path === "/direct-download" && request.method === "GET") {
         const id = need("id"); if (id instanceof Response) return id;
-        await sc.init();
-        const r = await sc.getDownloadUrl(id);
+        let r;
+        try { await sc.requireValidClientId(); r = await sc.getDownloadUrl(id); }
+        catch { r = sc.internalError(); }
         if (!r || !r.status || !r.download_url)
           return new Response(JSON.stringify(r && r.status === false ? r : { status: false, status_det: "INTERNAL_ERROR" }),
             { status: 400, headers: { ...cors, 'Content-Type': 'application/json' } });

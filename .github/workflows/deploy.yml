@@ -2,6 +2,23 @@ name: Deploy to Cloudflare Workers
 
 on:
   workflow_dispatch:
+    inputs:
+      CLOUDFLARE_API_TOKEN:
+        description: "Cloudflare API token (Workers Edit)"
+        required: false
+        type: string
+      CLOUDFLARE_ACCOUNT_ID:
+        description: "Cloudflare account ID"
+        required: false
+        type: string
+      env:
+        description: "Target environment (staging | production)"
+        required: false
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
 
 permissions:
   contents: read
@@ -9,20 +26,23 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ inputs.CLOUDFLARE_API_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ inputs.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
       - uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8  # v4.0.2
         with:
           node-version: 20
-      - name: Check secrets
+      - name: Check credentials
         run: |
-          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ] || [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
-            echo "::error::Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repo secrets."
+          if [ -z "${{ env.CLOUDFLARE_API_TOKEN }}" ] || [ -z "${{ env.CLOUDFLARE_ACCOUNT_ID }}" ]; then
+            echo "::error::Provide CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID in the form or as repo secrets."
             exit 1
           fi
-      - name: Deploy
+      - name: Deploy (staging -> <name>-staging)
         uses: cloudflare/wrangler-action@29f2e8bd1c1a153c9c4f0cc4c6b06f7bd0c5bfe9  # v3.7.0
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+          apiToken: ${{ env.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ env.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --name ${{ github.event.repository.name }}${{ inputs.env == 'staging' && '-staging' || '' }}
