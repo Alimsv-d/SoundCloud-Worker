@@ -2,6 +2,15 @@ name: Deploy to Cloudflare Workers
 
 on:
   workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment (staging | production)"
+        required: false
+        default: "production"
+        type: choice
+        options:
+          - staging
+          - production
 
 permissions:
   contents: read
@@ -20,9 +29,9 @@ jobs:
             echo "::error::Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repo secrets."
             exit 1
           fi
-      - name: Deploy
+      - name: Deploy (staging -> <name>-staging)
         uses: cloudflare/wrangler-action@29f2e8bd1c1a153c9c4f0cc4c6b06f7bd0c5bfe9  # v3.7.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy
+          command: deploy --name ${{ github.event.repository.name }}${{ inputs.env == 'staging' && '-staging' || '' }}
