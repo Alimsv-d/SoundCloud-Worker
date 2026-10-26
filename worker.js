@@ -1413,12 +1413,15 @@ export default {
           durMs = Math.round((best.durSec || 0) * 1000) || Math.round((m.duration || 0));
         } catch (e) { return err("INTERNAL", { detail: "remux: " + (e && e.message) }, reqId); }
         const h = new Headers(corsHdr);
-        h.set("Content-Type", "audio/mp4");
+        const wantExt = fMatch[2]; // request path ext decides the served mime/name
+        const mp3Name = wantExt === "mp3";
+        h.set("Content-Type", mp3Name ? "audio/mpeg" : "audio/mp4");
         h.set("Content-Length", String(body.length));
         h.set("Accept-Ranges", "bytes");
         h.set("ETag", `"${sid}-${body.length}"`);
         h.set("Cache-Control", "public, max-age=3600");
-        h.set("Content-Disposition", `inline; filename="track.m4a"; filename*=UTF-8''${encodeURIComponent((m.title||"track").slice(0,80))}.m4a`);
+        const dispName = (m.title || "track").slice(0, 80);
+        h.set("Content-Disposition", `inline; filename="track.${wantExt}"; filename*=UTF-8''${encodeURIComponent(dispName)}.${wantExt}`);
         h.set("X-Audio-Verified", verified ? "1" : "0");
         if (durMs) h.set("X-Audio-Duration-Ms", String(durMs));
         // Range support (single-range)
