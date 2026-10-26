@@ -79,7 +79,10 @@ npx wrangler kv:namespace create CACHE_KV   # optional; put the id in wrangler.t
 ```
 
 ### Option D — GitHub Action (manual workflow)
-Repo → **Settings → Secrets → Actions**, add `CLOUDFLARE_API_TOKEN` (Workers Scripts Edit) and `CLOUDFLARE_ACCOUNT_ID`. Run **Deploy to Cloudflare Workers** (workflow_dispatch).
+Repo → **Actions → Deploy to Cloudflare Workers → Run workflow** — fill
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` and `env` (staging|production)
+in the form and hit Run. No repo secrets are required; if you already saved
+them as secrets, blank form fields fall back to those.
 
 ### Per-OS install
 - **Android (Termux):** `pkg install nodejs git`, clone, `npm i -g wrangler`, `wrangler login`, `wrangler deploy`.
